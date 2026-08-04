@@ -4,30 +4,64 @@ use std::num::NonZeroU32;
 use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::NoPadding};
 use hmac::{KeyInit, Mac};
 use pbkdf2::pbkdf2_hmac_array;
+use sha1::Sha1;
 use sha2::Sha512;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const SQLITE_HEADER_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 const AES_BLOCK_SIZE: usize = 16;
+const SQLCIPHER3_PAGE_SIZE: usize = 1024;
 pub const SQLCIPHER4_PAGE_SIZE: usize = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompatibilityProfile {
+    SqlCipher3,
+    SqlCipher4,
+}
+
+impl CompatibilityProfile {
+    fn params(self) -> CipherParams {
+        match self {
+            Self::SqlCipher3 => CipherParams {
+                page_size: SQLCIPHER3_PAGE_SIZE,
+                kdf_iterations: 64_000,
+                kdf_algorithm: HashAlgorithm::Sha1,
+                hmac_algorithm: HashAlgorithm::Sha1,
+                reserve_size: 48,
+            },
+            Self::SqlCipher4 => CipherParams {
+                page_size: SQLCIPHER4_PAGE_SIZE,
+                kdf_iterations: 256_000,
+                kdf_algorithm: HashAlgorithm::Sha512,
+                hmac_algorithm: HashAlgorithm::Sha512,
+                reserve_size: 80,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum HashAlgorithm {
+    Sha1,
+    Sha512,
+}
+
+impl HashAlgorithm {
+    fn output_len(self) -> usize {
+        match self {
+            Self::Sha1 => 20,
+            Self::Sha512 => 64,
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct CipherParams {
     page_size: usize,
     kdf_iterations: u32,
+    kdf_algorithm: HashAlgorithm,
+    hmac_algorithm: HashAlgorithm,
     reserve_size: usize,
-    iv_size: usize,
-    hmac_size: usize,
-}
-
-impl CipherParams {
-    const SQLCIPHER4: Self = Self {
-        page_size: SQLCIPHER4_PAGE_SIZE,
-        kdf_iterations: 256_000,
-        reserve_size: 80,
-        iv_size: 16,
-        hmac_size: 64,
-    };
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -104,16 +138,26 @@ impl fmt::Display for DecryptError {
 impl std::error::Error for DecryptError {}
 
 impl Decryptor {
-    pub fn new_sqlcipher4(passphrase: &[u8], salt: &[u8; 16]) -> Result<Self, DecryptError> {
+    pub fn new(
+        profile: CompatibilityProfile,
+        passphrase: &[u8],
+        salt: &[u8; 16],
+    ) -> Result<Self, DecryptError> {
         if passphrase.is_empty() {
             return Err(DecryptError::EmptyPassphrase);
         }
 
-        let params = CipherParams::SQLCIPHER4;
-        let encryption_key =
-            pbkdf2_hmac_array::<Sha512, 32>(passphrase, salt, params.kdf_iterations);
+        let params = profile.params();
+
+        let encryption_key = Self::derive_key(
+            params.kdf_algorithm,
+            passphrase,
+            salt,
+            params.kdf_iterations,
+        );
         let hmac_salt: [u8; 16] = std::array::from_fn(|index| salt[index] ^ 0x3a);
-        let hmac_key = pbkdf2_hmac_array::<Sha512, 32>(&encryption_key, &hmac_salt, 2);
+
+        let hmac_key = Self::derive_key(params.kdf_algorithm, &encryption_key, &hmac_salt, 2);
 
         Ok(Self {
             params,
@@ -160,23 +204,14 @@ impl Decryptor {
         }
 
         let ciphertext_end = ciphertext_offset + ciphertext_len;
-        let iv_end = ciphertext_end + self.params.iv_size;
-        let hmac_end = iv_end + self.params.hmac_size;
+        let iv_end = ciphertext_end + AES_BLOCK_SIZE;
+        let hmac_end = iv_end + self.params.hmac_algorithm.output_len();
 
         let ciphertext = &encrypted_page[ciphertext_offset..ciphertext_end];
         let iv = &encrypted_page[ciphertext_end..iv_end];
         let stored_hmac = &encrypted_page[iv_end..hmac_end];
 
-        let mac = hmac::Hmac::<Sha512>::new_from_slice(&self.keys.hmac_key)
-            .map_err(|_| DecryptError::CryptoInitializationFailed)?
-            .chain_update(ciphertext)
-            .chain_update(iv)
-            .chain_update(page_number.to_le_bytes());
-
-        mac.verify_slice(stored_hmac)
-            .map_err(|_| DecryptError::AuthenticationFailed {
-                page_no: page_number,
-            })?;
+        self.verify_page_hmac(ciphertext, iv, page_number, stored_hmac)?;
 
         let cipher = cbc::Decryptor::<aes::Aes256>::new_from_slices(&self.keys.encryption_key, iv)
             .map_err(|_| DecryptError::CryptoInitializationFailed)?;
@@ -238,7 +273,7 @@ impl Decryptor {
         }
 
         let page_count = encrypted.len() / page_size;
-        let max_page_count = (u32::MAX - 1) as usize;
+        let max_page_count = u32::MAX as usize;
         if page_count > max_page_count {
             return Err(DecryptError::TooManyPages { page_count });
         }
@@ -260,6 +295,53 @@ impl Decryptor {
 
         Ok(output)
     }
+
+    fn derive_key(
+        algorithm: HashAlgorithm,
+        password: &[u8],
+        salt: &[u8],
+        iterations: u32,
+    ) -> [u8; 32] {
+        match algorithm {
+            HashAlgorithm::Sha1 => pbkdf2_hmac_array::<Sha1, 32>(password, salt, iterations),
+            HashAlgorithm::Sha512 => pbkdf2_hmac_array::<Sha512, 32>(password, salt, iterations),
+        }
+    }
+
+    fn verify_page_hmac(
+        &self,
+        ciphertext: &[u8],
+        iv: &[u8],
+        page_number: u32,
+        stored_hmac: &[u8],
+    ) -> Result<(), DecryptError> {
+        match self.params.hmac_algorithm {
+            HashAlgorithm::Sha1 => {
+                let mac = hmac::Hmac::<Sha1>::new_from_slice(&self.keys.hmac_key)
+                    .map_err(|_| DecryptError::CryptoInitializationFailed)?
+                    .chain_update(ciphertext)
+                    .chain_update(iv)
+                    .chain_update(page_number.to_le_bytes());
+
+                mac.verify_slice(stored_hmac)
+                    .map_err(|_| DecryptError::AuthenticationFailed {
+                        page_no: page_number,
+                    })
+            }
+            HashAlgorithm::Sha512 => {
+                let mac = hmac::Hmac::<Sha512>::new_from_slice(&self.keys.hmac_key)
+                    .map_err(|_| DecryptError::CryptoInitializationFailed)?
+                    .chain_update(ciphertext)
+                    .chain_update(iv)
+                    .chain_update(page_number.to_le_bytes());
+
+                mac.verify_slice(stored_hmac)
+                    .map_err(|_| DecryptError::AuthenticationFailed {
+                        page_no: page_number,
+                    })
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -269,8 +351,25 @@ mod tests {
 
     use super::*;
 
+    const SQLCIPHER3_FIXTURE: &[u8] = include_bytes!("../fixtures/sqlcipher3/encrypted.db");
+    const SQLCIPHER3_PASSPHRASE: &[u8] = b"veilite-sqlcipher3-test-key";
     const SQLCIPHER4_FIXTURE: &[u8] = include_bytes!("../fixtures/sqlcipher4/encrypted.db");
     const SQLCIPHER4_PASSPHRASE: &[u8] = b"veilite-sqlcipher4-test-key";
+
+    fn sqlcipher3_decryptor() -> &'static Decryptor {
+        static DECRYPTOR: OnceLock<Decryptor> = OnceLock::new();
+        DECRYPTOR.get_or_init(|| {
+            let salt: &[u8; 16] = SQLCIPHER3_FIXTURE[..16]
+                .try_into()
+                .expect("fixture has a salt");
+            Decryptor::new(
+                CompatibilityProfile::SqlCipher3,
+                SQLCIPHER3_PASSPHRASE,
+                salt,
+            )
+            .expect("fixture passphrase is non-empty")
+        })
+    }
 
     fn sqlcipher4_decryptor() -> &'static Decryptor {
         static DECRYPTOR: OnceLock<Decryptor> = OnceLock::new();
@@ -278,8 +377,12 @@ mod tests {
             let salt: &[u8; 16] = SQLCIPHER4_FIXTURE[..16]
                 .try_into()
                 .expect("fixture has a salt");
-            Decryptor::new_sqlcipher4(SQLCIPHER4_PASSPHRASE, salt)
-                .expect("fixture passphrase is non-empty")
+            Decryptor::new(
+                CompatibilityProfile::SqlCipher4,
+                SQLCIPHER4_PASSPHRASE,
+                salt,
+            )
+            .expect("fixture passphrase is non-empty")
         })
     }
 
@@ -307,11 +410,61 @@ mod tests {
     }
 
     #[test]
-    fn decrypts_complete_fixture() {
+    fn decrypts_sqlcipher3_fixture() {
+        let plaintext = sqlcipher3_decryptor()
+            .decrypt_database(SQLCIPHER3_FIXTURE)
+            .expect("SQLCipher 3 fixture should decrypt");
+
+        assert_eq!(sqlcipher3_decryptor().page_size(), SQLCIPHER3_PAGE_SIZE);
+        assert_eq!(plaintext.len(), SQLCIPHER3_FIXTURE.len());
+        assert_eq!(&plaintext[..16], SQLITE_HEADER_MAGIC);
+        assert_eq!(
+            u16::from_be_bytes([plaintext[16], plaintext[17]]),
+            SQLCIPHER3_PAGE_SIZE as u16
+        );
+        assert_eq!(plaintext[20], 48);
+        assert_eq!(
+            u32::from_be_bytes(plaintext[60..64].try_into().unwrap()),
+            42
+        );
+        assert_eq!(
+            u32::from_be_bytes(plaintext[68..72].try_into().unwrap()),
+            0x5645_4c49
+        );
+        assert!(plaintext.chunks_exact(SQLCIPHER3_PAGE_SIZE).all(|page| {
+            page[SQLCIPHER3_PAGE_SIZE - 48..]
+                .iter()
+                .all(|byte| *byte == 0)
+        }));
+    }
+
+    #[test]
+    fn ignores_unauthenticated_sqlcipher3_filler() {
+        let expected = sqlcipher3_decryptor()
+            .decrypt_database(SQLCIPHER3_FIXTURE)
+            .expect("fixture should decrypt");
+        let mut tampered = SQLCIPHER3_FIXTURE.to_vec();
+
+        for page in tampered.chunks_exact_mut(SQLCIPHER3_PAGE_SIZE) {
+            let filler_start = page.len() - 12;
+            page[filler_start] ^= 1;
+            page[page.len() - 1] ^= 1;
+        }
+
+        let actual = sqlcipher3_decryptor()
+            .decrypt_database(&tampered)
+            .expect("unauthenticated filler should be ignored");
+
+        assert_eq!(actual.as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn decrypts_sqlcipher4_fixture() {
         let plaintext = sqlcipher4_decryptor()
             .decrypt_database(SQLCIPHER4_FIXTURE)
-            .expect("fixture should decrypt");
+            .expect("SQLCipher 4 fixture should decrypt");
 
+        assert_eq!(sqlcipher4_decryptor().page_size(), SQLCIPHER4_PAGE_SIZE);
         assert_eq!(plaintext.len(), SQLCIPHER4_FIXTURE.len());
         assert_eq!(&plaintext[..16], SQLITE_HEADER_MAGIC);
         assert_eq!(u16::from_be_bytes([plaintext[16], plaintext[17]]), 4096);
@@ -328,13 +481,20 @@ mod tests {
 
     #[test]
     fn rejects_wrong_passphrase() {
-        let salt: &[u8; 16] = SQLCIPHER4_FIXTURE[..16].try_into().unwrap();
-        let wrong = Decryptor::new_sqlcipher4(b"wrong passphrase", salt).unwrap();
+        let cases: [(CompatibilityProfile, &[u8]); 2] = [
+            (CompatibilityProfile::SqlCipher3, SQLCIPHER3_FIXTURE),
+            (CompatibilityProfile::SqlCipher4, SQLCIPHER4_FIXTURE),
+        ];
 
-        assert_eq!(
-            wrong.decrypt_database(SQLCIPHER4_FIXTURE).unwrap_err(),
-            DecryptError::AuthenticationFailed { page_no: 1 }
-        );
+        for (profile, fixture) in cases {
+            let salt: &[u8; 16] = fixture[..16].try_into().unwrap();
+            let wrong = Decryptor::new(profile, b"wrong passphrase", salt).unwrap();
+
+            assert_eq!(
+                wrong.decrypt_database(fixture).unwrap_err(),
+                DecryptError::AuthenticationFailed { page_no: 1 }
+            );
+        }
     }
 
     #[test]
@@ -437,7 +597,7 @@ mod tests {
         let salt: &[u8; 16] = SQLCIPHER4_FIXTURE[..16].try_into().unwrap();
 
         assert!(matches!(
-            Decryptor::new_sqlcipher4(b"", salt),
+            Decryptor::new(CompatibilityProfile::SqlCipher4, b"", salt),
             Err(DecryptError::EmptyPassphrase)
         ));
     }

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-use veilite::{Decryptor, SQLCIPHER4_PAGE_SIZE};
+use veilite::{CompatibilityProfile, Decryptor, SQLCIPHER4_PAGE_SIZE};
 use zeroize::Zeroize;
 
 fn usage(program: &str) -> String {
@@ -62,7 +62,11 @@ fn run() -> Result<(), Box<dyn Error>> {
     })?;
     let mut salt = [0_u8; 16];
     salt.copy_from_slice(&encrypted[..16]);
-    let decryptor = Decryptor::new_sqlcipher4(passphrase.as_bytes(), &salt);
+    let decryptor = Decryptor::new(
+        CompatibilityProfile::SqlCipher4,
+        passphrase.as_bytes(),
+        &salt,
+    );
     passphrase.zeroize();
     salt.zeroize();
     let decryptor = decryptor?;
