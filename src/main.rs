@@ -65,6 +65,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let decryptor = Decryptor::new_sqlcipher4(passphrase.as_bytes(), &salt);
     passphrase.zeroize();
     salt.zeroize();
+    let decryptor = decryptor?;
 
     let plaintext = decryptor.decrypt_database(&encrypted)?;
     write_new_private_file(&output_path, plaintext.as_slice())?;
