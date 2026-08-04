@@ -6,11 +6,6 @@
 PRAGMA cipher_default_compatibility = 4;
 PRAGMA key = 'veilite-sqlcipher4-test-key';
 PRAGMA cipher_compatibility = 4;
-PRAGMA cipher_page_size = 4096;
-PRAGMA kdf_iter = 256000;
-PRAGMA cipher_use_hmac = ON;
-PRAGMA cipher_hmac_algorithm = HMAC_SHA512;
-PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512;
 PRAGMA journal_mode = DELETE;
 
 BEGIN IMMEDIATE;
