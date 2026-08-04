@@ -11,7 +11,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 const SQLITE_HEADER_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 const AES_BLOCK_SIZE: usize = 16;
 const SQLCIPHER3_PAGE_SIZE: usize = 1024;
-pub const SQLCIPHER4_PAGE_SIZE: usize = 4096;
+const SQLCIPHER4_PAGE_SIZE: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompatibilityProfile {
@@ -20,17 +20,24 @@ pub enum CompatibilityProfile {
 }
 
 impl CompatibilityProfile {
+    pub const fn page_size(self) -> usize {
+        match self {
+            Self::SqlCipher3 => SQLCIPHER3_PAGE_SIZE,
+            Self::SqlCipher4 => SQLCIPHER4_PAGE_SIZE,
+        }
+    }
+
     fn params(self) -> CipherParams {
         match self {
             Self::SqlCipher3 => CipherParams {
-                page_size: SQLCIPHER3_PAGE_SIZE,
+                page_size: self.page_size(),
                 kdf_iterations: 64_000,
                 kdf_algorithm: HashAlgorithm::Sha1,
                 hmac_algorithm: HashAlgorithm::Sha1,
                 reserve_size: 48,
             },
             Self::SqlCipher4 => CipherParams {
-                page_size: SQLCIPHER4_PAGE_SIZE,
+                page_size: self.page_size(),
                 kdf_iterations: 256_000,
                 kdf_algorithm: HashAlgorithm::Sha512,
                 hmac_algorithm: HashAlgorithm::Sha512,
