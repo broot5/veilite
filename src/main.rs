@@ -16,12 +16,15 @@ use zeroize::Zeroize;
     after_help = "Environment:\n  VEILITE_PASSPHRASE  Passphrase for the encrypted database"
 )]
 struct CliArgs {
-    #[arg(long, value_enum, value_name = "VERSION")]
+    /// SQLCipher on-disk compatibility profile
+    #[arg(long, value_enum, value_name = "PROFILE")]
     compatibility: CompatibilityArg,
 
+    /// SQLCipher encrypted main database
     #[arg(value_name = "ENCRYPTED_DB")]
     input_path: PathBuf,
 
+    /// Destination SQLite file; must not already exist
     #[arg(value_name = "DECRYPTED_SQLITE")]
     output_path: PathBuf,
 }
@@ -41,6 +44,26 @@ impl CompatibilityArg {
             Self::V4 => CompatibilityProfile::SqlCipher4,
         }
     }
+}
+
+fn validate_encrypted_file_size(file_size: usize, page_size: usize) -> io::Result<()> {
+    if file_size < page_size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "encrypted database is shorter than one page for the selected compatibility profile: {file_size} bytes"
+            ),
+        ));
+    }
+    if !file_size.is_multiple_of(page_size) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "encrypted database size {file_size} is not a multiple of the selected page size {page_size}"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn write_new_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
@@ -63,16 +86,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let profile = args.compatibility.profile();
     let encrypted = fs::read(&args.input_path)?;
     let page_size = profile.page_size();
-    if encrypted.len() < page_size {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "encrypted database is shorter than one page for the selected compatibility profile: {} bytes",
-                encrypted.len()
-            ),
-        )
-        .into());
-    }
+    validate_encrypted_file_size(encrypted.len(), page_size)?;
 
     let mut passphrase = std::env::var("VEILITE_PASSPHRASE").map_err(|_| {
         io::Error::new(io::ErrorKind::InvalidInput, "VEILITE_PASSPHRASE is not set")
@@ -104,6 +118,8 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use clap::{CommandFactory, error::ErrorKind};
+
     use super::*;
 
     #[test]
@@ -138,7 +154,7 @@ mod tests {
         ])
         .unwrap_err();
 
-        assert!(error.to_string().contains("possible values: 3, 4"));
+        assert_eq!(error.kind(), ErrorKind::InvalidValue);
     }
 
     #[test]
@@ -146,15 +162,36 @@ mod tests {
         let error =
             CliArgs::try_parse_from(["veilite", "encrypted.db", "decrypted.sqlite3"]).unwrap_err();
 
-        assert!(error.to_string().contains("--compatibility <VERSION>"));
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }
 
     #[test]
-    fn help_mentions_passphrase_environment_variable() {
+    fn help_describes_arguments_and_passphrase_environment_variable() {
         let help = CliArgs::try_parse_from(["veilite", "--help"])
             .unwrap_err()
             .to_string();
 
+        assert!(help.contains("--compatibility <PROFILE>"));
+        assert!(help.contains("SQLCipher encrypted main database"));
+        assert!(help.contains("Destination SQLite file; must not already exist"));
         assert!(help.contains("VEILITE_PASSPHRASE"));
+    }
+
+    #[test]
+    fn verifies_cli_definition() {
+        CliArgs::command().debug_assert();
+    }
+
+    #[test]
+    fn validates_encrypted_file_sizes() {
+        for page_size in [1024, 4096] {
+            assert!(validate_encrypted_file_size(page_size, page_size).is_ok());
+            assert!(validate_encrypted_file_size(page_size * 2, page_size).is_ok());
+
+            for file_size in [0, page_size - 1, page_size + 1] {
+                let error = validate_encrypted_file_size(file_size, page_size).unwrap_err();
+                assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            }
+        }
     }
 }
