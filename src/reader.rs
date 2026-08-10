@@ -87,14 +87,17 @@ impl<R: ReadAt> SqlCipherReader<R> {
         })
     }
 
-    pub fn page_size(&self) -> usize {
+    #[must_use]
+    pub const fn page_size(&self) -> usize {
         self.decryptor.page_size()
     }
 
+    #[must_use]
     pub const fn page_count(&self) -> u32 {
         self.page_count
     }
 
+    #[must_use]
     pub const fn file_size(&self) -> u64 {
         self.file_size
     }
@@ -140,8 +143,9 @@ impl<R: ReadAt> SqlCipherReader<R> {
         }
 
         self.decryptor
-            .decrypt_page_into(page_no, &encrypted_page, output)
-            .map_err(ReaderError::Decrypt)
+            .decrypt_page_into(page_no, &encrypted_page, output)?;
+
+        Ok(())
     }
 
     pub fn read_exact_at(

@@ -85,7 +85,8 @@ impl Decryptor {
         })
     }
 
-    pub fn page_size(&self) -> usize {
+    #[must_use]
+    pub const fn page_size(&self) -> usize {
         self.params.page_size
     }
 

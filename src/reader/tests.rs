@@ -62,7 +62,8 @@ fn opens_supported_fixtures() {
         assert_eq!(reader.page_size(), case.profile.page_size());
         assert_eq!(
             reader.page_count(),
-            (case.fixture.len() / case.profile.page_size()) as u32
+            u32::try_from(case.fixture.len() / case.profile.page_size())
+                .expect("fixture page count fits in u32")
         );
     }
 }
@@ -172,9 +173,8 @@ fn rejects_more_pages_than_u32_can_address() {
         let source = LengthOnlySource {
             length: page_count * profile.page_size() as u64,
         };
-        let error = match SqlCipherReader::open(source, profile, b"passphrase") {
-            Ok(_) => panic!("oversized database should be rejected"),
-            Err(error) => error,
+        let Err(error) = SqlCipherReader::open(source, profile, b"passphrase") else {
+            panic!("oversized database should be rejected");
         };
 
         assert!(matches!(

@@ -25,6 +25,7 @@ pub struct SliceSource<'a> {
 }
 
 impl<'a> SliceSource<'a> {
+    #[must_use]
     pub const fn new(bytes: &'a [u8]) -> Self {
         Self { bytes }
     }

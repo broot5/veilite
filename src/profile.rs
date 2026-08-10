@@ -8,6 +8,7 @@ pub enum CompatibilityProfile {
 }
 
 impl CompatibilityProfile {
+    #[must_use]
     pub const fn page_size(self) -> usize {
         match self {
             Self::SqlCipher3 => SQLCIPHER3_PAGE_SIZE,

@@ -127,7 +127,7 @@ fn decrypts_supported_fixtures() {
         assert_eq!(&plaintext[..16], SQLITE_HEADER_MAGIC);
         assert_eq!(
             u16::from_be_bytes([plaintext[16], plaintext[17]]),
-            page_size as u16
+            u16::try_from(page_size).expect("fixture page size fits in u16")
         );
         assert_eq!(usize::from(plaintext[20]), reserve_size);
         assert_eq!(
@@ -307,8 +307,12 @@ fn validates_decrypted_sqlite_header() {
         (FIXTURE_CASES[0], FIXTURE_CASES[1]),
         (FIXTURE_CASES[1], FIXTURE_CASES[0]),
     ] {
-        let encoded_page_size = (case.page_size as u16).to_be_bytes();
-        let other_encoded_page_size = (other.page_size as u16).to_be_bytes();
+        let encoded_page_size = u16::try_from(case.page_size)
+            .expect("fixture page size fits in u16")
+            .to_be_bytes();
+        let other_encoded_page_size = u16::try_from(other.page_size)
+            .expect("fixture page size fits in u16")
+            .to_be_bytes();
         let cases = [
             (
                 first_page_with_changed_header_byte(
@@ -326,8 +330,8 @@ fn validates_decrypted_sqlite_header() {
                 first_page_with_changed_header_byte(
                     case,
                     20,
-                    case.reserve_size as u8,
-                    other.reserve_size as u8,
+                    u8::try_from(case.reserve_size).expect("fixture reserve size fits in u8"),
+                    u8::try_from(other.reserve_size).expect("fixture reserve size fits in u8"),
                 ),
                 DecryptError::InvalidSqliteReserveSize {
                     expected: case.reserve_size,
