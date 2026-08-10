@@ -1,4 +1,3 @@
-use std::fmt;
 use std::num::NonZeroU32;
 
 use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::NoPadding};
@@ -6,6 +5,7 @@ use hmac::{KeyInit, Mac};
 use pbkdf2::pbkdf2_hmac_array;
 use sha1::Sha1;
 use sha2::Sha512;
+use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::profile::{CipherParams, CompatibilityProfile, HashAlgorithm};
@@ -24,67 +24,35 @@ pub struct Decryptor {
     keys: KeyMaterial,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum DecryptError {
+    #[error("the passphrase is empty")]
     EmptyPassphrase,
+    #[error("the encrypted database is empty")]
     EmptyDatabase,
+    #[error("invalid encrypted page length: expected {expected} bytes, got {actual}")]
     InvalidEncryptedPageLength { expected: usize, actual: usize },
+    #[error("invalid output page length: expected {expected} bytes, got {actual}")]
     InvalidOutputPageLength { expected: usize, actual: usize },
+    #[error(
+        "invalid SQLite page size in the decrypted header: expected {expected} bytes, got {actual}"
+    )]
     InvalidSqlitePageSize { expected: usize, actual: usize },
+    #[error(
+        "invalid SQLite reserve size in the decrypted header: expected {expected} bytes, got {actual}"
+    )]
     InvalidSqliteReserveSize { expected: usize, actual: usize },
+    #[error("authentication failed for page {page_no}: wrong passphrase or corrupted data")]
     AuthenticationFailed { page_no: u32 },
+    #[error("ciphertext on page {page_no} is not AES block-aligned")]
     InvalidCiphertextLength { page_no: u32 },
+    #[error("database size {file_size} is not a multiple of page size {page_size}")]
     IncompletePage { file_size: usize, page_size: usize },
+    #[error("database has too many pages: {page_count}")]
     TooManyPages { page_count: usize },
+    #[error("failed to initialize a cryptographic primitive")]
     CryptoInitializationFailed,
 }
-
-impl fmt::Display for DecryptError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyPassphrase => write!(f, "the passphrase is empty"),
-            Self::EmptyDatabase => write!(f, "the encrypted database is empty"),
-            Self::InvalidEncryptedPageLength { expected, actual } => write!(
-                f,
-                "invalid encrypted page length: expected {expected} bytes, got {actual}"
-            ),
-            Self::InvalidOutputPageLength { expected, actual } => write!(
-                f,
-                "invalid output page length: expected {expected} bytes, got {actual}"
-            ),
-            Self::InvalidSqlitePageSize { expected, actual } => write!(
-                f,
-                "invalid SQLite page size in the decrypted header: expected {expected} bytes, got {actual}"
-            ),
-            Self::InvalidSqliteReserveSize { expected, actual } => write!(
-                f,
-                "invalid SQLite reserve size in the decrypted header: expected {expected} bytes, got {actual}"
-            ),
-            Self::AuthenticationFailed { page_no } => write!(
-                f,
-                "authentication failed for page {page_no}: wrong passphrase or corrupted data"
-            ),
-            Self::InvalidCiphertextLength { page_no } => {
-                write!(f, "ciphertext on page {page_no} is not AES block-aligned")
-            }
-            Self::IncompletePage {
-                file_size,
-                page_size,
-            } => write!(
-                f,
-                "database size {file_size} is not a multiple of page size {page_size}"
-            ),
-            Self::TooManyPages { page_count } => {
-                write!(f, "database has too many pages: {page_count}")
-            }
-            Self::CryptoInitializationFailed => {
-                write!(f, "failed to initialize a cryptographic primitive")
-            }
-        }
-    }
-}
-
-impl std::error::Error for DecryptError {}
 
 impl Decryptor {
     pub fn new(
