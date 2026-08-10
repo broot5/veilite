@@ -69,6 +69,29 @@ fn opens_supported_fixtures() {
 }
 
 #[test]
+fn defers_passphrase_authentication_until_the_first_page_read() {
+    for case in FIXTURE_CASES {
+        let reader = SqlCipherReader::open(
+            SliceSource::new(case.fixture),
+            case.profile,
+            b"wrong passphrase",
+        )
+        .expect("opening a reader should only derive keys");
+        let mut output = vec![0xaa; reader.page_size()];
+
+        let error = reader
+            .read_page_into(NonZeroU32::new(1).unwrap(), &mut output)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ReaderError::Decrypt(DecryptError::AuthenticationFailed { page_no: 1 })
+        ));
+        assert!(output.iter().all(|byte| *byte == 0));
+    }
+}
+
+#[test]
 fn reads_single_pages() {
     for case in FIXTURE_CASES {
         let reader = case.reader();
