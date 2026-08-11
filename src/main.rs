@@ -3,7 +3,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use veilite::{CompatibilityProfile, Decryptor};
@@ -12,10 +12,22 @@ use zeroize::Zeroize;
 #[derive(Debug, Parser, PartialEq, Eq)]
 #[command(
     version,
-    about = "Decrypt a supported SQLCipher database into a SQLite file",
+    about = "Read supported SQLCipher databases",
     after_help = "Environment:\n  VEILITE_PASSPHRASE  Passphrase for the encrypted database"
 )]
 struct CliArgs {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+enum Command {
+    /// Decrypt a database into a SQLite file
+    Export(ExportArgs),
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+struct ExportArgs {
     /// SQLCipher on-disk compatibility profile
     #[arg(long, value_enum, value_name = "PROFILE")]
     compatibility: CompatibilityArg,
@@ -82,7 +94,12 @@ fn write_new_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
-    let args = CliArgs::parse();
+    match CliArgs::parse().command {
+        Command::Export(args) => export(args),
+    }
+}
+
+fn export(args: ExportArgs) -> Result<(), Box<dyn Error>> {
     let profile = args.compatibility.profile();
     let encrypted = fs::read(&args.input_path)?;
     let page_size = profile.page_size();
@@ -128,6 +145,7 @@ mod tests {
             assert_eq!(
                 CliArgs::try_parse_from([
                     "veilite",
+                    "export",
                     "--compatibility",
                     value,
                     "encrypted.db",
@@ -135,9 +153,11 @@ mod tests {
                 ])
                 .unwrap(),
                 CliArgs {
-                    compatibility,
-                    input_path: "encrypted.db".into(),
-                    output_path: "decrypted.sqlite3".into(),
+                    command: Command::Export(ExportArgs {
+                        compatibility,
+                        input_path: "encrypted.db".into(),
+                        output_path: "decrypted.sqlite3".into(),
+                    }),
                 }
             );
         }
@@ -147,6 +167,7 @@ mod tests {
     fn rejects_unsupported_compatibility() {
         let error = CliArgs::try_parse_from([
             "veilite",
+            "export",
             "--compatibility",
             "2",
             "encrypted.db",
@@ -160,21 +181,26 @@ mod tests {
     #[test]
     fn requires_explicit_compatibility() {
         let error =
-            CliArgs::try_parse_from(["veilite", "encrypted.db", "decrypted.sqlite3"]).unwrap_err();
+            CliArgs::try_parse_from(["veilite", "export", "encrypted.db", "decrypted.sqlite3"])
+                .unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }
 
     #[test]
-    fn help_describes_arguments_and_passphrase_environment_variable() {
-        let help = CliArgs::try_parse_from(["veilite", "--help"])
+    fn help_describes_export_arguments_and_passphrase_environment_variable() {
+        let root_help = CliArgs::try_parse_from(["veilite", "--help"])
+            .unwrap_err()
+            .to_string();
+        let export_help = CliArgs::try_parse_from(["veilite", "export", "--help"])
             .unwrap_err()
             .to_string();
 
-        assert!(help.contains("--compatibility <PROFILE>"));
-        assert!(help.contains("SQLCipher encrypted main database"));
-        assert!(help.contains("Destination SQLite file; must not already exist"));
-        assert!(help.contains("VEILITE_PASSPHRASE"));
+        assert!(root_help.contains("export"));
+        assert!(root_help.contains("VEILITE_PASSPHRASE"));
+        assert!(export_help.contains("--compatibility <PROFILE>"));
+        assert!(export_help.contains("SQLCipher encrypted main database"));
+        assert!(export_help.contains("Destination SQLite file; must not already exist"));
     }
 
     #[test]
