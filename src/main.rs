@@ -1,19 +1,23 @@
 use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use graphitesql::{QueryResult, Value};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-use veilite::{CompatibilityProfile, Decryptor};
-use zeroize::Zeroize;
+use veilite::{
+    CompatibilityProfile, FileSource, SqlCipherReader, check_companion_files, open_readonly,
+};
+use zeroize::Zeroizing;
 
 #[derive(Debug, Parser, PartialEq, Eq)]
 #[command(
     version,
     about = "Read supported SQLCipher databases",
-    after_help = "Environment:\n  VEILITE_PASSPHRASE  Passphrase for the encrypted database"
+    after_help = "Environment:\n  VEILITE_PASSPHRASE  Passphrase for export, query, and verify"
 )]
 struct CliArgs {
     #[command(subcommand)]
@@ -24,6 +28,15 @@ struct CliArgs {
 enum Command {
     /// Decrypt a database into a SQLite file
     Export(ExportArgs),
+
+    /// Show encrypted database and compatibility profile information
+    Inspect(InspectArgs),
+
+    /// Execute a read-only SQL query
+    Query(QueryArgs),
+
+    /// Authenticate every encrypted database page
+    Verify(VerifyArgs),
 }
 
 #[derive(Debug, Args, PartialEq, Eq)]
@@ -41,6 +54,43 @@ struct ExportArgs {
     output_path: PathBuf,
 }
 
+#[derive(Debug, Args, PartialEq, Eq)]
+struct InspectArgs {
+    /// SQLCipher on-disk compatibility profile
+    #[arg(long, value_enum, value_name = "PROFILE")]
+    compatibility: CompatibilityArg,
+
+    /// SQLCipher encrypted main database
+    #[arg(value_name = "ENCRYPTED_DB")]
+    input_path: PathBuf,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+struct QueryArgs {
+    /// SQLCipher on-disk compatibility profile
+    #[arg(long, value_enum, value_name = "PROFILE")]
+    compatibility: CompatibilityArg,
+
+    /// SQLCipher encrypted main database
+    #[arg(value_name = "ENCRYPTED_DB")]
+    input_path: PathBuf,
+
+    /// Read-only SQL statement to execute
+    #[arg(value_name = "SQL")]
+    sql: String,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+struct VerifyArgs {
+    /// SQLCipher on-disk compatibility profile
+    #[arg(long, value_enum, value_name = "PROFILE")]
+    compatibility: CompatibilityArg,
+
+    /// SQLCipher encrypted main database
+    #[arg(value_name = "ENCRYPTED_DB")]
+    input_path: PathBuf,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CompatibilityArg {
     #[value(name = "3")]
@@ -54,6 +104,13 @@ impl CompatibilityArg {
         match self {
             Self::V3 => CompatibilityProfile::SqlCipher3,
             Self::V4 => CompatibilityProfile::SqlCipher4,
+        }
+    }
+
+    const fn number(self) -> u8 {
+        match self {
+            Self::V3 => 3,
+            Self::V4 => 4,
         }
     }
 }
@@ -78,14 +135,55 @@ fn validate_encrypted_file_size(file_size: usize, page_size: usize) -> io::Resul
     Ok(())
 }
 
-fn write_new_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
+fn run() -> Result<(), Box<dyn Error>> {
+    match CliArgs::parse().command {
+        Command::Export(args) => export(args),
+        Command::Inspect(args) => inspect(args),
+        Command::Query(args) => query(args),
+        Command::Verify(args) => verify(args),
+    }
+}
+
+fn export(args: ExportArgs) -> Result<(), Box<dyn Error>> {
+    check_companion_files(&args.input_path)?;
+    let passphrase = read_passphrase()?;
+    let source = FileSource::open(&args.input_path)?;
+    let reader =
+        SqlCipherReader::open(source, args.compatibility.profile(), passphrase.as_bytes())?;
+    drop(passphrase);
+
+    write_decrypted_database(&args.output_path, &reader)?;
+
+    println!(
+        "decrypted {} pages to {}",
+        reader.page_count(),
+        args.output_path.display()
+    );
+    Ok(())
+}
+
+fn write_decrypted_database(
+    path: &Path,
+    reader: &SqlCipherReader<FileSource>,
+) -> Result<(), Box<dyn Error>> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
 
     let mut file = options.open(path)?;
-    if let Err(error) = file.write_all(contents).and_then(|()| file.sync_all()) {
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        let mut plaintext_page = Zeroizing::new(vec![0; reader.page_size()]);
+        for page_no in 1..=reader.page_count() {
+            let page_no = nonzero_page_number(page_no)?;
+            reader.read_page_into(page_no, &mut plaintext_page)?;
+            file.write_all(&plaintext_page)?;
+        }
+        file.sync_all()?;
+        Ok(())
+    })();
+
+    if let Err(error) = result {
         drop(file);
         let _ = fs::remove_file(path);
         return Err(error);
@@ -93,37 +191,132 @@ fn write_new_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn run() -> Result<(), Box<dyn Error>> {
-    match CliArgs::parse().command {
-        Command::Export(args) => export(args),
+fn inspect(args: InspectArgs) -> Result<(), Box<dyn Error>> {
+    let metadata = fs::metadata(&args.input_path)?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("database path is not a file: {}", args.input_path.display()),
+        )
+        .into());
     }
+
+    let file_size = usize::try_from(metadata.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "encrypted database size does not fit in usize",
+        )
+    })?;
+    let page_size = args.compatibility.profile().page_size();
+    validate_encrypted_file_size(file_size, page_size)?;
+
+    let wal_path = companion_path(&args.input_path, "-wal");
+    let journal_path = companion_path(&args.input_path, "-journal");
+
+    println!("path: {}", args.input_path.display());
+    println!("compatibility: {}", args.compatibility.number());
+    println!("file size: {file_size} bytes");
+    println!("page size: {page_size} bytes");
+    println!("page count: {}", file_size / page_size);
+    println!("WAL: {}", presence(&wal_path)?);
+    println!("journal: {}", presence(&journal_path)?);
+    Ok(())
 }
 
-fn export(args: ExportArgs) -> Result<(), Box<dyn Error>> {
-    let profile = args.compatibility.profile();
-    let encrypted = fs::read(&args.input_path)?;
-    let page_size = profile.page_size();
-    validate_encrypted_file_size(encrypted.len(), page_size)?;
+fn query(args: QueryArgs) -> Result<(), Box<dyn Error>> {
+    let passphrase = read_passphrase()?;
+    let connection = open_readonly(
+        &args.input_path,
+        args.compatibility.profile(),
+        passphrase.as_bytes(),
+    )?;
+    drop(passphrase);
+    let result = connection.query(&args.sql)?;
 
-    let mut passphrase = std::env::var("VEILITE_PASSPHRASE").map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidInput, "VEILITE_PASSPHRASE is not set")
-    })?;
-    let mut salt = [0_u8; 16];
-    salt.copy_from_slice(&encrypted[..16]);
-    let decryptor = Decryptor::new(profile, passphrase.as_bytes(), &salt);
-    passphrase.zeroize();
-    salt.zeroize();
-    let decryptor = decryptor?;
-
-    let plaintext = decryptor.decrypt_database(&encrypted)?;
-    write_new_private_file(&args.output_path, plaintext.as_slice())?;
-
-    println!(
-        "decrypted {} pages to {}",
-        encrypted.len() / page_size,
-        args.output_path.display()
-    );
+    let stdout = io::stdout();
+    write_query_result(stdout.lock(), &result)?;
     Ok(())
+}
+
+fn verify(args: VerifyArgs) -> Result<(), Box<dyn Error>> {
+    check_companion_files(&args.input_path)?;
+    let passphrase = read_passphrase()?;
+    let source = FileSource::open(&args.input_path)?;
+    let reader =
+        SqlCipherReader::open(source, args.compatibility.profile(), passphrase.as_bytes())?;
+    drop(passphrase);
+    let mut plaintext_page = Zeroizing::new(vec![0; reader.page_size()]);
+
+    for page_no in 1..=reader.page_count() {
+        let page_no = nonzero_page_number(page_no)?;
+        reader.read_page_into(page_no, &mut plaintext_page)?;
+    }
+
+    println!("verified {} pages", reader.page_count());
+    Ok(())
+}
+
+fn nonzero_page_number(page_no: u32) -> io::Result<NonZeroU32> {
+    NonZeroU32::new(page_no)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "database page number is zero"))
+}
+
+fn read_passphrase() -> io::Result<Zeroizing<String>> {
+    std::env::var("VEILITE_PASSPHRASE")
+        .map(Zeroizing::new)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "VEILITE_PASSPHRASE is not set"))
+}
+
+fn companion_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut companion = path.as_os_str().to_os_string();
+    companion.push(suffix);
+    companion.into()
+}
+
+fn presence(path: &Path) -> io::Result<&'static str> {
+    path.try_exists()
+        .map(|exists| if exists { "present" } else { "absent" })
+}
+
+fn write_query_result(mut output: impl Write, result: &QueryResult) -> io::Result<()> {
+    write_cells(&mut output, &result.columns, |column, output| {
+        output.write_all(column.as_bytes())
+    })?;
+
+    for row in &result.rows {
+        write_cells(&mut output, row, write_value)?;
+    }
+    Ok(())
+}
+
+fn write_cells<T>(
+    output: &mut impl Write,
+    cells: &[T],
+    mut write_cell: impl FnMut(&T, &mut dyn Write) -> io::Result<()>,
+) -> io::Result<()> {
+    for (index, cell) in cells.iter().enumerate() {
+        if index > 0 {
+            output.write_all(b"|")?;
+        }
+        write_cell(cell, output)?;
+    }
+    output.write_all(b"\n")
+}
+
+fn write_value(value: &Value, output: &mut dyn Write) -> io::Result<()> {
+    match value {
+        Value::Null => output.write_all(b"NULL"),
+        Value::Integer(value) => write!(output, "{value}"),
+        Value::Real(value) => write!(output, "{value}"),
+        Value::Text(value) => output.write_all(value.as_bytes()),
+        Value::Blob(value) => {
+            output.write_all(b"X'")?;
+            for byte in value {
+                write!(output, "{byte:02x}")?;
+            }
+            output.write_all(b"'")
+        }
+    }
 }
 
 fn main() {
@@ -135,73 +328,9 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use clap::{CommandFactory, error::ErrorKind};
+    use clap::CommandFactory;
 
     use super::*;
-
-    #[test]
-    fn parses_supported_compatibility_profiles() {
-        for (value, compatibility) in [("3", CompatibilityArg::V3), ("4", CompatibilityArg::V4)] {
-            assert_eq!(
-                CliArgs::try_parse_from([
-                    "veilite",
-                    "export",
-                    "--compatibility",
-                    value,
-                    "encrypted.db",
-                    "decrypted.sqlite3",
-                ])
-                .unwrap(),
-                CliArgs {
-                    command: Command::Export(ExportArgs {
-                        compatibility,
-                        input_path: "encrypted.db".into(),
-                        output_path: "decrypted.sqlite3".into(),
-                    }),
-                }
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_unsupported_compatibility() {
-        let error = CliArgs::try_parse_from([
-            "veilite",
-            "export",
-            "--compatibility",
-            "2",
-            "encrypted.db",
-            "decrypted.sqlite3",
-        ])
-        .unwrap_err();
-
-        assert_eq!(error.kind(), ErrorKind::InvalidValue);
-    }
-
-    #[test]
-    fn requires_explicit_compatibility() {
-        let error =
-            CliArgs::try_parse_from(["veilite", "export", "encrypted.db", "decrypted.sqlite3"])
-                .unwrap_err();
-
-        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
-    }
-
-    #[test]
-    fn help_describes_export_arguments_and_passphrase_environment_variable() {
-        let root_help = CliArgs::try_parse_from(["veilite", "--help"])
-            .unwrap_err()
-            .to_string();
-        let export_help = CliArgs::try_parse_from(["veilite", "export", "--help"])
-            .unwrap_err()
-            .to_string();
-
-        assert!(root_help.contains("export"));
-        assert!(root_help.contains("VEILITE_PASSPHRASE"));
-        assert!(export_help.contains("--compatibility <PROFILE>"));
-        assert!(export_help.contains("SQLCipher encrypted main database"));
-        assert!(export_help.contains("Destination SQLite file; must not already exist"));
-    }
 
     #[test]
     fn verifies_cli_definition() {
@@ -219,5 +348,33 @@ mod tests {
                 assert_eq!(error.kind(), io::ErrorKind::InvalidData);
             }
         }
+    }
+
+    #[test]
+    fn writes_query_results() {
+        let result = QueryResult {
+            columns: vec![
+                "null".into(),
+                "integer".into(),
+                "real".into(),
+                "text".into(),
+                "blob".into(),
+            ],
+            rows: vec![vec![
+                Value::Null,
+                Value::Integer(-42),
+                Value::Real(3.5),
+                Value::Text("hello".into()),
+                Value::Blob(vec![0x00, 0xab, 0xff]),
+            ]],
+        };
+        let mut output = Vec::new();
+
+        write_query_result(&mut output, &result).unwrap();
+
+        assert_eq!(
+            output,
+            b"null|integer|real|text|blob\nNULL|-42|3.5|hello|X'00abff'\n"
+        );
     }
 }

@@ -7,7 +7,12 @@ use graphitesql::{Connection, Error as GraphiteError};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-use crate::{CompatibilityProfile, DecryptError, FileSource, ReaderError, SqlCipherReader};
+#[cfg(test)]
+use crate::companion::companion_path;
+use crate::{
+    CompanionError, CompatibilityProfile, DecryptError, FileSource, ReaderError, SqlCipherReader,
+    check_companion_files,
+};
 
 const WAL_SUFFIX: &str = "-wal";
 const JOURNAL_SUFFIX: &str = "-journal";
@@ -19,32 +24,10 @@ const JOURNAL_ERROR: &str = "SQLCipher rollback journals are unsupported";
 pub enum GraphiteAdapterError {
     #[error("database path is not valid UTF-8: {path:?}")]
     NonUtf8Path { path: PathBuf },
-    #[error("SQLCipher WAL companion file is unsupported: {path:?}")]
-    UnsupportedWal { path: PathBuf },
-    #[error("SQLCipher rollback journal companion file is unsupported: {path:?}")]
-    UnsupportedJournal { path: PathBuf },
-    #[error("failed to inspect companion path {path:?}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
+    #[error(transparent)]
+    Companion(#[from] CompanionError),
     #[error("GraphiteSQL failed to open the database: {0}")]
     Graphite(#[from] GraphiteError),
-}
-
-impl GraphiteAdapterError {
-    fn into_graphite(self) -> GraphiteError {
-        match self {
-            Self::UnsupportedWal { .. } => GraphiteError::Unsupported(WAL_ERROR),
-            Self::UnsupportedJournal { .. } => GraphiteError::Unsupported(JOURNAL_ERROR),
-            io_error @ Self::Io { .. } => GraphiteError::Io(io_error.to_string()),
-            path_error @ Self::NonUtf8Path { .. } => {
-                GraphiteError::CantOpen(path_error.to_string())
-            }
-            Self::Graphite(source) => source,
-        }
-    }
 }
 
 pub struct SqlCipherFile {
@@ -135,7 +118,7 @@ impl Vfs for SqlCipherVfs {
         // Callers may invoke `Vfs::open` directly without going through
         // `open_readonly`, so check for companion files before opening the main
         // database.
-        check_companion_files(&self.main_path).map_err(GraphiteAdapterError::into_graphite)?;
+        check_companion_files(&self.main_path).map_err(map_companion_to_graphite)?;
         let source = FileSource::open(&self.main_path).map_err(|error| match error.kind() {
             io::ErrorKind::NotFound => GraphiteError::CantOpen(path.to_owned()),
             _ => GraphiteError::Io(error.to_string()),
@@ -171,35 +154,12 @@ fn read_only_error() -> GraphiteError {
     GraphiteError::Error(READ_ONLY_ERROR.to_owned())
 }
 
-fn check_companion_files(path: &Path) -> Result<(), GraphiteAdapterError> {
-    let wal_path = companion_path(path, WAL_SUFFIX);
-    if path_exists(&wal_path)? {
-        return Err(GraphiteAdapterError::UnsupportedWal { path: wal_path });
+fn map_companion_to_graphite(error: CompanionError) -> GraphiteError {
+    match error {
+        CompanionError::UnsupportedWal { .. } => GraphiteError::Unsupported(WAL_ERROR),
+        CompanionError::UnsupportedJournal { .. } => GraphiteError::Unsupported(JOURNAL_ERROR),
+        io_error @ CompanionError::Io { .. } => GraphiteError::Io(io_error.to_string()),
     }
-
-    let journal_path = companion_path(path, JOURNAL_SUFFIX);
-    if path_exists(&journal_path)? {
-        return Err(GraphiteAdapterError::UnsupportedJournal { path: journal_path });
-    }
-
-    Ok(())
-}
-
-fn path_exists(path: &Path) -> Result<bool, GraphiteAdapterError> {
-    match fs::metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(GraphiteAdapterError::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
-    }
-}
-
-fn companion_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut companion = path.as_os_str().to_os_string();
-    companion.push(suffix);
-    companion.into()
 }
 
 fn companion_path_string(path: &str, suffix: &str) -> String {

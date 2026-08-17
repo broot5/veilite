@@ -156,7 +156,8 @@ fn rejects_companion_files_before_opening_the_database() {
             CompatibilityProfile::SqlCipher4,
             SQLCIPHER4_PASSPHRASE,
         ),
-        Err(GraphiteAdapterError::UnsupportedWal { path }) if path == wal_path
+        Err(GraphiteAdapterError::Companion(CompanionError::UnsupportedWal { path }))
+            if path == wal_path
     ));
 
     fs::remove_file(&wal_path).unwrap();
@@ -167,7 +168,8 @@ fn rejects_companion_files_before_opening_the_database() {
             CompatibilityProfile::SqlCipher4,
             SQLCIPHER4_PASSPHRASE,
         ),
-        Err(GraphiteAdapterError::UnsupportedJournal { path }) if path == journal_path
+        Err(GraphiteAdapterError::Companion(CompanionError::UnsupportedJournal { path }))
+            if path == journal_path
     ));
 }
 
