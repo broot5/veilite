@@ -125,7 +125,7 @@ impl CompatibilityArg {
     }
 }
 
-fn validate_encrypted_file_size(file_size: usize, page_size: usize) -> io::Result<()> {
+fn validate_encrypted_file_size(file_size: u64, page_size: u64) -> io::Result<()> {
     if file_size < page_size {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -211,13 +211,8 @@ fn inspect(args: InspectArgs) -> Result<(), Box<dyn Error>> {
         .into());
     }
 
-    let file_size = usize::try_from(metadata.len()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "encrypted database size does not fit in usize",
-        )
-    })?;
-    let page_size = args.compatibility.profile().page_size();
+    let file_size = metadata.len();
+    let page_size = args.compatibility.profile().page_size() as u64;
     validate_encrypted_file_size(file_size, page_size)?;
 
     let wal_path = companion_path(&args.input_path, "-wal");
@@ -379,7 +374,7 @@ mod tests {
 
     #[test]
     fn validates_inspect_file_sizes() {
-        for page_size in [1024, 4096] {
+        for page_size in [1024_u64, 4096] {
             assert!(validate_encrypted_file_size(page_size, page_size).is_ok());
             assert!(validate_encrypted_file_size(page_size * 2, page_size).is_ok());
 
@@ -388,6 +383,8 @@ mod tests {
                 assert_eq!(error.kind(), io::ErrorKind::InvalidData);
             }
         }
+
+        assert!(validate_encrypted_file_size(1_u64 << 32, 4096).is_ok());
     }
 
     #[test]
