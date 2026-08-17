@@ -1,0 +1,15 @@
+[package]
+name = "veilite-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "veilite"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+rpassword.workspace = true
+veilite-core.workspace = true
+veilite-graphitesql.workspace = true
+zeroize.workspace = true

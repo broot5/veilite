@@ -5,9 +5,9 @@ use zeroize::Zeroizing;
 
 use super::*;
 
-const SQLCIPHER3_FIXTURE: &[u8] = include_bytes!("../../fixtures/sqlcipher3/encrypted.db");
+const SQLCIPHER3_FIXTURE: &[u8] = include_bytes!("../../../../fixtures/sqlcipher3/encrypted.db");
 const SQLCIPHER3_PASSPHRASE: &[u8] = b"veilite-sqlcipher3-test-key";
-const SQLCIPHER4_FIXTURE: &[u8] = include_bytes!("../../fixtures/sqlcipher4/encrypted.db");
+const SQLCIPHER4_FIXTURE: &[u8] = include_bytes!("../../../../fixtures/sqlcipher4/encrypted.db");
 const SQLCIPHER4_PASSPHRASE: &[u8] = b"veilite-sqlcipher4-test-key";
 
 #[derive(Clone, Copy)]

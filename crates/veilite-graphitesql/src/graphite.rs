@@ -3,16 +3,18 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use graphitesql::vfs::{File, OpenFlags, Vfs};
-use graphitesql::{Connection, Error as GraphiteError};
+use graphitesql::{
+    Connection as GraphiteConnection, Error as GraphiteError, QueryResult as GraphiteQueryResult,
+    Value as GraphiteValue,
+};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+use veilite_core::{CompatibilityProfile, DecryptError, FileSource, ReaderError, SqlCipherReader};
+
 #[cfg(test)]
 use crate::companion::companion_path;
-use crate::{
-    CompanionError, CompatibilityProfile, DecryptError, FileSource, ReaderError, SqlCipherReader,
-    check_companion_files,
-};
+use crate::{CompanionError, check_companion_files};
 
 const WAL_SUFFIX: &str = "-wal";
 const JOURNAL_SUFFIX: &str = "-journal";
@@ -26,8 +28,40 @@ pub enum GraphiteAdapterError {
     NonUtf8Path { path: PathBuf },
     #[error(transparent)]
     Companion(#[from] CompanionError),
-    #[error("GraphiteSQL failed to open the database: {0}")]
-    Graphite(#[from] GraphiteError),
+    #[error("GraphiteSQL failed to open the database: {message}")]
+    Open { message: String },
+    #[error("GraphiteSQL query failed: {message}")]
+    Query { message: String },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Value>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
+    Null,
+    Integer(i64),
+    Real(f64),
+    Text(Vec<u8>),
+    Blob(Vec<u8>),
+}
+
+pub struct ReadonlyConnection {
+    inner: GraphiteConnection,
+}
+
+impl ReadonlyConnection {
+    pub fn query(&self, sql: &str) -> Result<QueryResult, GraphiteAdapterError> {
+        self.inner
+            .query(sql)
+            .map(convert_query_result)
+            .map_err(|error| GraphiteAdapterError::Query {
+                message: error.to_string(),
+            })
+    }
 }
 
 pub struct SqlCipherFile {
@@ -94,9 +128,15 @@ impl SqlCipherVfs {
         })
     }
 
-    pub fn open_readonly(&self) -> Result<Connection, GraphiteAdapterError> {
+    pub fn open_readonly(&self) -> Result<ReadonlyConnection, GraphiteAdapterError> {
         check_companion_files(&self.main_path)?;
-        Connection::open_readonly_vfs(self, &self.main_path_utf8).map_err(Into::into)
+        let inner =
+            GraphiteConnection::open_readonly_vfs(self, &self.main_path_utf8).map_err(|error| {
+                GraphiteAdapterError::Open {
+                    message: error.to_string(),
+                }
+            })?;
+        Ok(ReadonlyConnection { inner })
     }
 }
 
@@ -146,8 +186,29 @@ pub fn open_readonly(
     path: impl AsRef<Path>,
     profile: CompatibilityProfile,
     passphrase: &[u8],
-) -> Result<Connection, GraphiteAdapterError> {
+) -> Result<ReadonlyConnection, GraphiteAdapterError> {
     SqlCipherVfs::new(path, profile, passphrase)?.open_readonly()
+}
+
+fn convert_query_result(result: GraphiteQueryResult) -> QueryResult {
+    QueryResult {
+        columns: result.columns,
+        rows: result
+            .rows
+            .into_iter()
+            .map(|row| row.into_iter().map(convert_value).collect())
+            .collect(),
+    }
+}
+
+fn convert_value(value: GraphiteValue) -> Value {
+    match value {
+        GraphiteValue::Null => Value::Null,
+        GraphiteValue::Integer(value) => Value::Integer(value),
+        GraphiteValue::Real(value) => Value::Real(value),
+        GraphiteValue::Text(value) => Value::Text(value.into_bytes()),
+        GraphiteValue::Blob(value) => Value::Blob(value),
+    }
 }
 
 fn read_only_error() -> GraphiteError {

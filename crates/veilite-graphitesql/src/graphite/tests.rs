@@ -2,8 +2,6 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use graphitesql::Value;
-
 use super::*;
 
 const SQLCIPHER3_PASSPHRASE: &[u8] = b"veilite-sqlcipher3-test-key";
@@ -32,7 +30,7 @@ const FIXTURE_CASES: [FixtureCase; 2] = [
 impl FixtureCase {
     fn path(self) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures")
+            .join("../../fixtures")
             .join(self.name)
             .join("encrypted.db")
     }
@@ -53,21 +51,21 @@ fn queries_supported_fixtures() {
             [
                 vec![
                     Value::Integer(1),
-                    Value::Text("Alice".into()),
-                    Value::Text("plain ASCII".into()),
+                    Value::Text(b"Alice".to_vec()),
+                    Value::Text(b"plain ASCII".to_vec()),
                     Value::Real(98.5),
                     Value::Integer(1),
                 ],
                 vec![
                     Value::Integer(2),
-                    Value::Text("홍길동".into()),
-                    Value::Text("한국어, emoji 🔐, and 'quotes'".into()),
+                    Value::Text("홍길동".as_bytes().to_vec()),
+                    Value::Text("한국어, emoji 🔐, and 'quotes'".as_bytes().to_vec()),
                     Value::Real(-12.25),
                     Value::Integer(1),
                 ],
                 vec![
                     Value::Integer(3),
-                    Value::Text("Null Tester".into()),
+                    Value::Text(b"Null Tester".to_vec()),
                     Value::Null,
                     Value::Real(0.0),
                     Value::Integer(0),
@@ -84,13 +82,13 @@ fn queries_supported_fixtures() {
             binary_samples.rows,
             [
                 vec![
-                    Value::Text("all-byte-edges".into()),
+                    Value::Text(b"all-byte-edges".to_vec()),
                     Value::Blob(vec![
                         0x00, 0x01, 0x02, 0x03, 0x7f, 0x80, 0xfc, 0xfd, 0xfe, 0xff
                     ]),
                 ],
                 vec![
-                    Value::Text("large-zero-blob".into()),
+                    Value::Text(b"large-zero-blob".to_vec()),
                     Value::Blob(vec![0; 10_000]),
                 ],
             ],
@@ -106,6 +104,7 @@ fn connection_rejects_writes() {
     let mut connection = open_readonly(case.path(), case.profile, case.passphrase).unwrap();
 
     let error = connection
+        .inner
         .execute("UPDATE people SET name = 'Mallory' WHERE id = 1")
         .unwrap_err();
     assert_eq!(error, GraphiteError::Error(READ_ONLY_ERROR.into()));

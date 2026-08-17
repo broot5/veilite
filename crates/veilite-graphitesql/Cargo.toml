@@ -1,0 +1,10 @@
+[package]
+name = "veilite-graphitesql"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+graphitesql.workspace = true
+thiserror.workspace = true
+veilite-core.workspace = true
+zeroize.workspace = true

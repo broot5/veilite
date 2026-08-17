@@ -5,12 +5,10 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use graphitesql::{QueryResult, Value};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-use veilite::{
-    CompatibilityProfile, FileSource, SqlCipherReader, check_companion_files, open_readonly,
-};
+use veilite_core::{CompatibilityProfile, FileSource, SqlCipherReader};
+use veilite_graphitesql::{QueryResult, Value, check_companion_files, open_readonly};
 use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Debug, Parser)]
@@ -236,7 +234,6 @@ fn inspect(args: InspectArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn query(args: QueryArgs) -> Result<(), Box<dyn Error>> {
-    check_companion_files(&args.input_path)?;
     let passphrase = read_passphrase(&args.passphrase)?;
     let connection = open_readonly(
         &args.input_path,
@@ -351,7 +348,7 @@ fn write_value(value: &Value, output: &mut dyn Write) -> io::Result<()> {
         Value::Null => output.write_all(b"NULL"),
         Value::Integer(value) => write!(output, "{value}"),
         Value::Real(value) => write!(output, "{value}"),
-        Value::Text(value) => output.write_all(value.as_bytes()),
+        Value::Text(value) => output.write_all(value),
         Value::Blob(value) => {
             output.write_all(b"X'")?;
             for byte in value {
@@ -421,7 +418,7 @@ mod tests {
                 Value::Null,
                 Value::Integer(-42),
                 Value::Real(3.5),
-                Value::Text("hello".into()),
+                Value::Text(b"hello".to_vec()),
                 Value::Blob(vec![0x00, 0xab, 0xff]),
             ]],
         };

@@ -7,9 +7,9 @@ use super::*;
 use crate::decryptor::PageDecryptor;
 use crate::{FileSource, SliceSource};
 
-const SQLCIPHER3_FIXTURE: &[u8] = include_bytes!("../../fixtures/sqlcipher3/encrypted.db");
+const SQLCIPHER3_FIXTURE: &[u8] = include_bytes!("../../../../fixtures/sqlcipher3/encrypted.db");
 const SQLCIPHER3_PASSPHRASE: &[u8] = b"veilite-sqlcipher3-test-key";
-const SQLCIPHER4_FIXTURE: &[u8] = include_bytes!("../../fixtures/sqlcipher4/encrypted.db");
+const SQLCIPHER4_FIXTURE: &[u8] = include_bytes!("../../../../fixtures/sqlcipher4/encrypted.db");
 const SQLCIPHER4_PASSPHRASE: &[u8] = b"veilite-sqlcipher4-test-key";
 
 #[derive(Clone, Copy)]
@@ -363,7 +363,7 @@ fn reads_only_the_physical_pages_needed_for_a_range() {
 fn reads_from_a_file_without_loading_it_in_full() {
     let case = FIXTURE_CASES[1];
     let fixture_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/sqlcipher4/encrypted.db");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/sqlcipher4/encrypted.db");
     let reader = SqlCipherReader::open(
         FileSource::open(fixture_path).unwrap(),
         case.profile,
