@@ -242,7 +242,7 @@ fn page_number_is_authenticated() {
 }
 
 #[test]
-fn validates_page_buffer_sizes() {
+fn rejects_invalid_page_buffer_lengths() {
     for case in FIXTURE_CASES {
         let page_size = case.page_size;
         let mut output = vec![0_u8; page_size];
@@ -312,7 +312,7 @@ fn rejects_empty_passphrase() {
 }
 
 #[test]
-fn validates_decrypted_sqlite_header() {
+fn rejects_mismatched_sqlite_header_fields() {
     for (case, other) in [
         (FIXTURE_CASES[0], FIXTURE_CASES[1]),
         (FIXTURE_CASES[1], FIXTURE_CASES[0]),

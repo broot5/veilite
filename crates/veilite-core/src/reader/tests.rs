@@ -70,7 +70,7 @@ impl FixtureCase {
 }
 
 #[test]
-fn opens_supported_fixtures() {
+fn opens_supported_fixture_metadata() {
     for case in FIXTURE_CASES {
         let reader = case.reader();
 
@@ -360,7 +360,7 @@ fn reads_only_the_physical_pages_needed_for_a_range() {
 }
 
 #[test]
-fn reads_from_a_file_without_loading_it_in_full() {
+fn reads_ranges_from_file_source() {
     let case = FIXTURE_CASES[1];
     let fixture_path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/sqlcipher4/encrypted.db");

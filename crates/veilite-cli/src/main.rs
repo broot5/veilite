@@ -378,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn validates_encrypted_file_sizes() {
+    fn validates_inspect_file_sizes() {
         for page_size in [1024, 4096] {
             assert!(validate_encrypted_file_size(page_size, page_size).is_ok());
             assert!(validate_encrypted_file_size(page_size * 2, page_size).is_ok());

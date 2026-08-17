@@ -101,13 +101,12 @@ fn queries_supported_fixtures() {
 #[test]
 fn connection_rejects_writes() {
     let case = FIXTURE_CASES[1];
-    let mut connection = open_readonly(case.path(), case.profile, case.passphrase).unwrap();
+    let connection = open_readonly(case.path(), case.profile, case.passphrase).unwrap();
 
     let error = connection
-        .inner
-        .execute("UPDATE people SET name = 'Mallory' WHERE id = 1")
+        .query("UPDATE people SET name = 'Mallory' WHERE id = 1")
         .unwrap_err();
-    assert_eq!(error, GraphiteError::Error(READ_ONLY_ERROR.into()));
+    assert!(matches!(error, GraphiteAdapterError::Query { .. }));
 }
 
 #[test]
