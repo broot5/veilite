@@ -11,20 +11,16 @@ use std::os::unix::fs::OpenOptionsExt;
 use veilite::{
     CompatibilityProfile, FileSource, SqlCipherReader, check_companion_files, open_readonly,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
-#[derive(Debug, Parser, PartialEq, Eq)]
-#[command(
-    version,
-    about = "Read supported SQLCipher databases",
-    after_help = "Environment:\n  VEILITE_PASSPHRASE  Passphrase for export, query, and verify"
-)]
+#[derive(Debug, Parser)]
+#[command(version, about = "Read supported SQLCipher databases")]
 struct CliArgs {
     #[command(subcommand)]
     command: Command,
 }
 
-#[derive(Debug, Subcommand, PartialEq, Eq)]
+#[derive(Debug, Subcommand)]
 enum Command {
     /// Decrypt a database into a SQLite file
     Export(ExportArgs),
@@ -39,11 +35,14 @@ enum Command {
     Verify(VerifyArgs),
 }
 
-#[derive(Debug, Args, PartialEq, Eq)]
+#[derive(Debug, Args)]
 struct ExportArgs {
     /// SQLCipher on-disk compatibility profile
     #[arg(long, value_enum, value_name = "PROFILE")]
     compatibility: CompatibilityArg,
+
+    #[command(flatten)]
+    passphrase: PassphraseArgs,
 
     /// SQLCipher encrypted main database
     #[arg(value_name = "ENCRYPTED_DB")]
@@ -54,7 +53,7 @@ struct ExportArgs {
     output_path: PathBuf,
 }
 
-#[derive(Debug, Args, PartialEq, Eq)]
+#[derive(Debug, Args)]
 struct InspectArgs {
     /// SQLCipher on-disk compatibility profile
     #[arg(long, value_enum, value_name = "PROFILE")]
@@ -65,11 +64,14 @@ struct InspectArgs {
     input_path: PathBuf,
 }
 
-#[derive(Debug, Args, PartialEq, Eq)]
+#[derive(Debug, Args)]
 struct QueryArgs {
     /// SQLCipher on-disk compatibility profile
     #[arg(long, value_enum, value_name = "PROFILE")]
     compatibility: CompatibilityArg,
+
+    #[command(flatten)]
+    passphrase: PassphraseArgs,
 
     /// SQLCipher encrypted main database
     #[arg(value_name = "ENCRYPTED_DB")]
@@ -80,18 +82,28 @@ struct QueryArgs {
     sql: String,
 }
 
-#[derive(Debug, Args, PartialEq, Eq)]
+#[derive(Debug, Args)]
 struct VerifyArgs {
     /// SQLCipher on-disk compatibility profile
     #[arg(long, value_enum, value_name = "PROFILE")]
     compatibility: CompatibilityArg,
+
+    #[command(flatten)]
+    passphrase: PassphraseArgs,
 
     /// SQLCipher encrypted main database
     #[arg(value_name = "ENCRYPTED_DB")]
     input_path: PathBuf,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Args)]
+struct PassphraseArgs {
+    /// Read the passphrase from the first line of FILE instead of prompting
+    #[arg(long, value_name = "FILE")]
+    passphrase_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum CompatibilityArg {
     #[value(name = "3")]
     V3,
@@ -146,10 +158,10 @@ fn run() -> Result<(), Box<dyn Error>> {
 
 fn export(args: ExportArgs) -> Result<(), Box<dyn Error>> {
     check_companion_files(&args.input_path)?;
-    let passphrase = read_passphrase()?;
+    let passphrase = read_passphrase(&args.passphrase)?;
     let source = FileSource::open(&args.input_path)?;
     let reader =
-        SqlCipherReader::open(source, args.compatibility.profile(), passphrase.as_bytes())?;
+        SqlCipherReader::open(source, args.compatibility.profile(), passphrase.as_slice())?;
     drop(passphrase);
 
     write_decrypted_database(&args.output_path, &reader)?;
@@ -224,11 +236,12 @@ fn inspect(args: InspectArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn query(args: QueryArgs) -> Result<(), Box<dyn Error>> {
-    let passphrase = read_passphrase()?;
+    check_companion_files(&args.input_path)?;
+    let passphrase = read_passphrase(&args.passphrase)?;
     let connection = open_readonly(
         &args.input_path,
         args.compatibility.profile(),
-        passphrase.as_bytes(),
+        passphrase.as_slice(),
     )?;
     drop(passphrase);
     let result = connection.query(&args.sql)?;
@@ -240,10 +253,10 @@ fn query(args: QueryArgs) -> Result<(), Box<dyn Error>> {
 
 fn verify(args: VerifyArgs) -> Result<(), Box<dyn Error>> {
     check_companion_files(&args.input_path)?;
-    let passphrase = read_passphrase()?;
+    let passphrase = read_passphrase(&args.passphrase)?;
     let source = FileSource::open(&args.input_path)?;
     let reader =
-        SqlCipherReader::open(source, args.compatibility.profile(), passphrase.as_bytes())?;
+        SqlCipherReader::open(source, args.compatibility.profile(), passphrase.as_slice())?;
     drop(passphrase);
     let mut plaintext_page = Zeroizing::new(vec![0; reader.page_size()]);
 
@@ -261,10 +274,40 @@ fn nonzero_page_number(page_no: u32) -> io::Result<NonZeroU32> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "database page number is zero"))
 }
 
-fn read_passphrase() -> io::Result<Zeroizing<String>> {
-    std::env::var("VEILITE_PASSPHRASE")
-        .map(Zeroizing::new)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "VEILITE_PASSPHRASE is not set"))
+fn read_passphrase(args: &PassphraseArgs) -> io::Result<Zeroizing<Vec<u8>>> {
+    match &args.passphrase_file {
+        Some(path) => read_passphrase_file(path),
+        None => rpassword::prompt_password("Passphrase: ")
+            .map(String::into_bytes)
+            .map(Zeroizing::new),
+    }
+}
+
+fn read_passphrase_file(path: &Path) -> io::Result<Zeroizing<Vec<u8>>> {
+    let bytes = fs::read(path).map_err(|source| {
+        io::Error::new(
+            source.kind(),
+            format!(
+                "failed to read passphrase file {}: {source}",
+                path.display()
+            ),
+        )
+    })?;
+    let mut passphrase = Zeroizing::new(bytes);
+
+    truncate_to_first_line(&mut passphrase);
+
+    Ok(passphrase)
+}
+
+fn truncate_to_first_line(passphrase: &mut Vec<u8>) {
+    if let Some(line_end) = passphrase.iter().position(|byte| *byte == b'\n') {
+        passphrase[line_end..].zeroize();
+        passphrase.truncate(line_end);
+    }
+    if passphrase.last() == Some(&b'\r') {
+        passphrase.pop();
+    }
 }
 
 fn companion_path(path: &Path, suffix: &str) -> PathBuf {
@@ -347,6 +390,20 @@ mod tests {
                 let error = validate_encrypted_file_size(file_size, page_size).unwrap_err();
                 assert_eq!(error.kind(), io::ErrorKind::InvalidData);
             }
+        }
+    }
+
+    #[test]
+    fn keeps_only_the_first_passphrase_file_line() {
+        for (mut contents, expected) in [
+            (b"passphrase".to_vec(), b"passphrase".as_slice()),
+            (b"passphrase\nignored".to_vec(), b"passphrase".as_slice()),
+            (b"passphrase\r\nignored".to_vec(), b"passphrase".as_slice()),
+            (Vec::new(), b"".as_slice()),
+        ] {
+            truncate_to_first_line(&mut contents);
+
+            assert_eq!(contents, expected);
         }
     }
 
