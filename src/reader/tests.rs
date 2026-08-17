@@ -4,6 +4,7 @@ use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use super::*;
+use crate::decryptor::PageDecryptor;
 use crate::{FileSource, SliceSource};
 
 const SQLCIPHER3_FIXTURE: &[u8] = include_bytes!("../../fixtures/sqlcipher3/encrypted.db");
@@ -46,10 +47,25 @@ impl FixtureCase {
 
     fn plaintext(self) -> Zeroizing<Vec<u8>> {
         let salt = self.fixture[..16].try_into().unwrap();
-        Decryptor::new(self.profile, self.passphrase, salt)
-            .unwrap()
-            .decrypt_database(self.fixture)
-            .unwrap()
+        let decryptor = PageDecryptor::new(self.profile, self.passphrase, salt).unwrap();
+        let page_size = decryptor.page_size();
+        let mut plaintext = Zeroizing::new(vec![0; self.fixture.len()]);
+
+        for (index, encrypted_page) in self.fixture.chunks_exact(page_size).enumerate() {
+            let page_no =
+                NonZeroU32::new(u32::try_from(index + 1).expect("fixture page number fits"))
+                    .expect("fixture page numbers start at one");
+            let start = index * page_size;
+            decryptor
+                .decrypt_page_into(
+                    page_no,
+                    encrypted_page,
+                    &mut plaintext[start..start + page_size],
+                )
+                .unwrap();
+        }
+
+        plaintext
     }
 }
 

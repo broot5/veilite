@@ -6,7 +6,7 @@ use pbkdf2::pbkdf2_hmac_array;
 use sha1::Sha1;
 use sha2::Sha512;
 use thiserror::Error;
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::profile::{CipherParams, CompatibilityProfile, HashAlgorithm};
 
@@ -19,7 +19,7 @@ struct KeyMaterial {
     hmac_key: [u8; 32],
 }
 
-pub struct Decryptor {
+pub(crate) struct PageDecryptor {
     params: CipherParams,
     keys: KeyMaterial,
 }
@@ -28,8 +28,6 @@ pub struct Decryptor {
 pub enum DecryptError {
     #[error("the passphrase is empty")]
     EmptyPassphrase,
-    #[error("the encrypted database is empty")]
-    EmptyDatabase,
     #[error("invalid encrypted page length: expected {expected} bytes, got {actual}")]
     InvalidEncryptedPageLength { expected: usize, actual: usize },
     #[error("invalid output page length: expected {expected} bytes, got {actual}")]
@@ -46,16 +44,12 @@ pub enum DecryptError {
     AuthenticationFailed { page_no: u32 },
     #[error("ciphertext on page {page_no} is not AES block-aligned")]
     InvalidCiphertextLength { page_no: u32 },
-    #[error("database size {file_size} is not a multiple of page size {page_size}")]
-    IncompletePage { file_size: usize, page_size: usize },
-    #[error("database has too many pages: {page_count}")]
-    TooManyPages { page_count: usize },
     #[error("failed to initialize a cryptographic primitive")]
     CryptoInitializationFailed,
 }
 
-impl Decryptor {
-    pub fn new(
+impl PageDecryptor {
+    pub(crate) fn new(
         profile: CompatibilityProfile,
         passphrase: &[u8],
         salt: &[u8; 16],
@@ -86,11 +80,11 @@ impl Decryptor {
     }
 
     #[must_use]
-    pub const fn page_size(&self) -> usize {
+    pub(crate) const fn page_size(&self) -> usize {
         self.params.page_size
     }
 
-    pub fn decrypt_page_into(
+    pub(crate) fn decrypt_page_into(
         &self,
         page_no: NonZeroU32,
         encrypted_page: &[u8],
@@ -175,43 +169,6 @@ impl Decryptor {
         }
 
         Ok(())
-    }
-
-    pub fn decrypt_database(&self, encrypted: &[u8]) -> Result<Zeroizing<Vec<u8>>, DecryptError> {
-        if encrypted.is_empty() {
-            return Err(DecryptError::EmptyDatabase);
-        }
-
-        let page_size = self.params.page_size;
-        if !encrypted.len().is_multiple_of(page_size) {
-            return Err(DecryptError::IncompletePage {
-                file_size: encrypted.len(),
-                page_size,
-            });
-        }
-
-        let page_count = encrypted.len() / page_size;
-        let max_page_count = u32::MAX as usize;
-        if page_count > max_page_count {
-            return Err(DecryptError::TooManyPages { page_count });
-        }
-
-        let mut output = Zeroizing::new(vec![0; encrypted.len()]);
-        for (index, encrypted_page) in encrypted.chunks_exact(page_size).enumerate() {
-            let page_number =
-                u32::try_from(index + 1).map_err(|_| DecryptError::TooManyPages { page_count })?;
-            let page_number =
-                NonZeroU32::new(page_number).ok_or(DecryptError::TooManyPages { page_count })?;
-            let start = index * page_size;
-
-            self.decrypt_page_into(
-                page_number,
-                encrypted_page,
-                &mut output[start..start + page_size],
-            )?;
-        }
-
-        Ok(output)
     }
 
     fn derive_key(

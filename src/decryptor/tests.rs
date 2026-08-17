@@ -1,6 +1,8 @@
 use std::num::NonZeroU32;
 use std::sync::OnceLock;
 
+use zeroize::Zeroizing;
+
 use super::*;
 
 const SQLCIPHER3_FIXTURE: &[u8] = include_bytes!("../../fixtures/sqlcipher3/encrypted.db");
@@ -32,21 +34,21 @@ const FIXTURE_CASES: [FixtureCase; 2] = [
 ];
 
 impl FixtureCase {
-    fn decryptor(self) -> &'static Decryptor {
+    fn page_decryptor(self) -> &'static PageDecryptor {
         match self.profile {
-            CompatibilityProfile::SqlCipher3 => sqlcipher3_decryptor(),
-            CompatibilityProfile::SqlCipher4 => sqlcipher4_decryptor(),
+            CompatibilityProfile::SqlCipher3 => sqlcipher3_page_decryptor(),
+            CompatibilityProfile::SqlCipher4 => sqlcipher4_page_decryptor(),
         }
     }
 }
 
-fn sqlcipher3_decryptor() -> &'static Decryptor {
-    static DECRYPTOR: OnceLock<Decryptor> = OnceLock::new();
+fn sqlcipher3_page_decryptor() -> &'static PageDecryptor {
+    static DECRYPTOR: OnceLock<PageDecryptor> = OnceLock::new();
     DECRYPTOR.get_or_init(|| {
         let salt: &[u8; 16] = SQLCIPHER3_FIXTURE[..16]
             .try_into()
             .expect("fixture has a salt");
-        Decryptor::new(
+        PageDecryptor::new(
             CompatibilityProfile::SqlCipher3,
             SQLCIPHER3_PASSPHRASE,
             salt,
@@ -55,19 +57,40 @@ fn sqlcipher3_decryptor() -> &'static Decryptor {
     })
 }
 
-fn sqlcipher4_decryptor() -> &'static Decryptor {
-    static DECRYPTOR: OnceLock<Decryptor> = OnceLock::new();
+fn sqlcipher4_page_decryptor() -> &'static PageDecryptor {
+    static DECRYPTOR: OnceLock<PageDecryptor> = OnceLock::new();
     DECRYPTOR.get_or_init(|| {
         let salt: &[u8; 16] = SQLCIPHER4_FIXTURE[..16]
             .try_into()
             .expect("fixture has a salt");
-        Decryptor::new(
+        PageDecryptor::new(
             CompatibilityProfile::SqlCipher4,
             SQLCIPHER4_PASSPHRASE,
             salt,
         )
         .expect("fixture passphrase is non-empty")
     })
+}
+
+fn decrypt_fixture_pages(
+    decryptor: &PageDecryptor,
+    encrypted: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, DecryptError> {
+    let page_size = decryptor.page_size();
+    let mut plaintext = Zeroizing::new(vec![0; encrypted.len()]);
+
+    for (index, encrypted_page) in encrypted.chunks_exact(page_size).enumerate() {
+        let page_no = NonZeroU32::new(u32::try_from(index + 1).expect("fixture page number fits"))
+            .expect("fixture page numbers start at one");
+        let start = index * page_size;
+        decryptor.decrypt_page_into(
+            page_no,
+            encrypted_page,
+            &mut plaintext[start..start + page_size],
+        )?;
+    }
+
+    Ok(plaintext)
 }
 
 fn first_page_with_changed_header_byte(
@@ -78,7 +101,7 @@ fn first_page_with_changed_header_byte(
 ) -> Vec<u8> {
     assert!((16..32).contains(&header_offset));
 
-    let decryptor = case.decryptor();
+    let decryptor = case.page_decryptor();
     let page_size = case.page_size;
     let mut page = case.fixture[..page_size].to_vec();
     let ciphertext_end = page_size - case.reserve_size;
@@ -114,14 +137,12 @@ fn first_page_with_changed_header_byte(
 #[test]
 fn decrypts_supported_fixtures() {
     for case in FIXTURE_CASES {
-        let plaintext = case
-            .decryptor()
-            .decrypt_database(case.fixture)
+        let plaintext = decrypt_fixture_pages(case.page_decryptor(), case.fixture)
             .unwrap_or_else(|error| panic!("{:?}: {error}", case.profile));
         let page_size = case.page_size;
         let reserve_size = case.reserve_size;
 
-        assert_eq!(case.decryptor().page_size(), page_size);
+        assert_eq!(case.page_decryptor().page_size(), page_size);
         assert_eq!(case.profile.page_size(), page_size);
         assert_eq!(plaintext.len(), case.fixture.len());
         assert_eq!(&plaintext[..16], SQLITE_HEADER_MAGIC);
@@ -148,8 +169,7 @@ fn decrypts_supported_fixtures() {
 
 #[test]
 fn ignores_unauthenticated_sqlcipher3_filler() {
-    let expected = sqlcipher3_decryptor()
-        .decrypt_database(SQLCIPHER3_FIXTURE)
+    let expected = decrypt_fixture_pages(sqlcipher3_page_decryptor(), SQLCIPHER3_FIXTURE)
         .expect("fixture should decrypt");
     let mut tampered = SQLCIPHER3_FIXTURE.to_vec();
 
@@ -159,8 +179,7 @@ fn ignores_unauthenticated_sqlcipher3_filler() {
         page[page.len() - 1] ^= 1;
     }
 
-    let actual = sqlcipher3_decryptor()
-        .decrypt_database(&tampered)
+    let actual = decrypt_fixture_pages(sqlcipher3_page_decryptor(), &tampered)
         .expect("unauthenticated filler should be ignored");
 
     assert_eq!(actual.as_slice(), expected.as_slice());
@@ -170,10 +189,17 @@ fn ignores_unauthenticated_sqlcipher3_filler() {
 fn rejects_wrong_passphrase() {
     for case in FIXTURE_CASES {
         let salt: &[u8; 16] = case.fixture[..16].try_into().unwrap();
-        let wrong = Decryptor::new(case.profile, b"wrong passphrase", salt).unwrap();
+        let wrong = PageDecryptor::new(case.profile, b"wrong passphrase", salt).unwrap();
+        let mut output = vec![0; case.page_size];
 
         assert_eq!(
-            wrong.decrypt_database(case.fixture).unwrap_err(),
+            wrong
+                .decrypt_page_into(
+                    NonZeroU32::new(1).unwrap(),
+                    &case.fixture[..case.page_size],
+                    &mut output,
+                )
+                .unwrap_err(),
             DecryptError::AuthenticationFailed { page_no: 1 }
         );
     }
@@ -186,10 +212,13 @@ fn rejects_tampering_in_ciphertext_iv_and_hmac() {
         let hmac_start = iv_start + AES_BLOCK_SIZE;
 
         for index in [16, iv_start, hmac_start] {
-            let mut tampered = case.fixture.to_vec();
+            let mut tampered = case.fixture[..case.page_size].to_vec();
             tampered[index] ^= 1;
+            let mut output = vec![0; case.page_size];
             assert_eq!(
-                case.decryptor().decrypt_database(&tampered).unwrap_err(),
+                case.page_decryptor()
+                    .decrypt_page_into(NonZeroU32::new(1).unwrap(), &tampered, &mut output)
+                    .unwrap_err(),
                 DecryptError::AuthenticationFailed { page_no: 1 }
             );
         }
@@ -204,7 +233,7 @@ fn page_number_is_authenticated() {
         let mut output = vec![0_u8; page_size];
 
         assert_eq!(
-            case.decryptor()
+            case.page_decryptor()
                 .decrypt_page_into(NonZeroU32::new(3).unwrap(), second_page, &mut output)
                 .unwrap_err(),
             DecryptError::AuthenticationFailed { page_no: 3 }
@@ -218,7 +247,7 @@ fn validates_page_buffer_sizes() {
         let page_size = case.page_size;
         let mut output = vec![0_u8; page_size];
         assert_eq!(
-            case.decryptor()
+            case.page_decryptor()
                 .decrypt_page_into(
                     NonZeroU32::new(1).unwrap(),
                     &case.fixture[..page_size - 1],
@@ -233,7 +262,7 @@ fn validates_page_buffer_sizes() {
 
         let mut short_output = vec![0_u8; page_size - 1];
         assert_eq!(
-            case.decryptor()
+            case.page_decryptor()
                 .decrypt_page_into(
                     NonZeroU32::new(1).unwrap(),
                     &case.fixture[..page_size],
@@ -254,7 +283,7 @@ fn clears_reserved_output_bytes() {
         let page_size = case.page_size;
         let reserve_size = case.reserve_size;
         let mut output = vec![0xaa; page_size];
-        case.decryptor()
+        case.page_decryptor()
             .decrypt_page_into(
                 NonZeroU32::new(1).unwrap(),
                 &case.fixture[..page_size],
@@ -271,31 +300,12 @@ fn clears_reserved_output_bytes() {
 }
 
 #[test]
-fn rejects_empty_and_incomplete_databases() {
-    for case in FIXTURE_CASES {
-        assert_eq!(
-            case.decryptor().decrypt_database(&[]).unwrap_err(),
-            DecryptError::EmptyDatabase
-        );
-        assert_eq!(
-            case.decryptor()
-                .decrypt_database(&case.fixture[..case.fixture.len() - 1])
-                .unwrap_err(),
-            DecryptError::IncompletePage {
-                file_size: case.fixture.len() - 1,
-                page_size: case.page_size,
-            }
-        );
-    }
-}
-
-#[test]
 fn rejects_empty_passphrase() {
     for case in FIXTURE_CASES {
         let salt: &[u8; 16] = case.fixture[..16].try_into().unwrap();
 
         assert!(matches!(
-            Decryptor::new(case.profile, b"", salt),
+            PageDecryptor::new(case.profile, b"", salt),
             Err(DecryptError::EmptyPassphrase)
         ));
     }
@@ -343,7 +353,7 @@ fn validates_decrypted_sqlite_header() {
         for (page, expected_error) in cases {
             let mut output = vec![0xaa; case.page_size];
             let error = case
-                .decryptor()
+                .page_decryptor()
                 .decrypt_page_into(NonZeroU32::new(1).unwrap(), &page, &mut output)
                 .unwrap_err();
 

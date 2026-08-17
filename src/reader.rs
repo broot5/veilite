@@ -3,7 +3,8 @@ use std::num::NonZeroU32;
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{CompatibilityProfile, DecryptError, Decryptor, ReadAt};
+use crate::decryptor::PageDecryptor;
+use crate::{CompatibilityProfile, DecryptError, ReadAt};
 
 const DATABASE_SALT_SIZE: usize = 16;
 
@@ -37,7 +38,7 @@ pub enum ReaderError<E> {
 
 pub struct SqlCipherReader<R> {
     source: R,
-    decryptor: Decryptor,
+    decryptor: PageDecryptor,
     file_size: u64,
     page_count: u32,
 }
@@ -77,7 +78,7 @@ impl<R: ReadAt> SqlCipherReader<R> {
         source
             .read_exact_at(0, &mut salt)
             .map_err(ReaderError::Source)?;
-        let decryptor = Decryptor::new(profile, passphrase, &salt)?;
+        let decryptor = PageDecryptor::new(profile, passphrase, &salt)?;
 
         Ok(Self {
             source,
