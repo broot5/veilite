@@ -1,6 +1,6 @@
 .bail on
 
--- SQLCipher Community 4.17.0 / compatibility 4
+-- SQLCipher Community 4.18.0 / compatibility 4
 -- Test-only passphrase: veilite-sqlcipher4-test-key
 -- The connection must be keyed before the first database read or write.
 PRAGMA cipher_default_compatibility = 4;

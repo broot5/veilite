@@ -3,31 +3,62 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
+use veilite_core::{CipherConfig, CipherPreset, HashAlgorithm};
 
 const SQLCIPHER3_PASSPHRASE: &[u8] = b"veilite-sqlcipher3-test-key";
 const SQLCIPHER4_PASSPHRASE: &[u8] = b"veilite-sqlcipher4-test-key";
+const SQLCIPHER_CUSTOM_PASSPHRASE: &[u8] = b"veilite-sqlcipher-custom-test-key";
+
+#[derive(Clone, Copy)]
+enum FixtureCipher {
+    SqlCipher3,
+    SqlCipher4,
+    Custom,
+}
+
+impl FixtureCipher {
+    fn config(self) -> CipherConfig {
+        match self {
+            Self::SqlCipher3 => CipherPreset::SqlCipher3.into(),
+            Self::SqlCipher4 => CipherPreset::SqlCipher4.into(),
+            Self::Custom => {
+                CipherConfig::new(2048, 100_000, HashAlgorithm::Sha256, HashAlgorithm::Sha256)
+                    .expect("custom fixture configuration is valid")
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct FixtureCase {
     name: &'static str,
-    profile: CompatibilityProfile,
+    cipher: FixtureCipher,
     passphrase: &'static [u8],
 }
 
-const FIXTURE_CASES: [FixtureCase; 2] = [
+const FIXTURE_CASES: [FixtureCase; 3] = [
     FixtureCase {
         name: "sqlcipher3",
-        profile: CompatibilityProfile::SqlCipher3,
+        cipher: FixtureCipher::SqlCipher3,
         passphrase: SQLCIPHER3_PASSPHRASE,
     },
     FixtureCase {
         name: "sqlcipher4",
-        profile: CompatibilityProfile::SqlCipher4,
+        cipher: FixtureCipher::SqlCipher4,
         passphrase: SQLCIPHER4_PASSPHRASE,
+    },
+    FixtureCase {
+        name: "sqlcipher-custom",
+        cipher: FixtureCipher::Custom,
+        passphrase: SQLCIPHER_CUSTOM_PASSPHRASE,
     },
 ];
 
 impl FixtureCase {
+    fn cipher_config(self) -> CipherConfig {
+        self.cipher.config()
+    }
+
     fn path(self) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures")
@@ -39,7 +70,7 @@ impl FixtureCase {
 #[test]
 fn queries_supported_fixtures() {
     for case in FIXTURE_CASES {
-        let connection = open_readonly(case.path(), case.profile, case.passphrase)
+        let connection = open_readonly(case.path(), case.cipher_config(), case.passphrase)
             .unwrap_or_else(|error| panic!("{} failed to open: {error}", case.name));
 
         let people = connection
@@ -100,44 +131,50 @@ fn queries_supported_fixtures() {
 
 #[test]
 fn connection_rejects_writes() {
-    let case = FIXTURE_CASES[1];
-    let connection = open_readonly(case.path(), case.profile, case.passphrase).unwrap();
+    for case in FIXTURE_CASES {
+        let connection = open_readonly(case.path(), case.cipher_config(), case.passphrase).unwrap();
 
-    let error = connection
-        .query("UPDATE people SET name = 'Mallory' WHERE id = 1")
-        .unwrap_err();
-    assert!(matches!(error, GraphiteAdapterError::Query { .. }));
+        let error = connection
+            .query("UPDATE people SET name = 'Mallory' WHERE id = 1")
+            .unwrap_err();
+        assert!(
+            matches!(error, GraphiteAdapterError::Query { .. }),
+            "{}",
+            case.name
+        );
+    }
 }
 
 #[test]
 fn file_adapter_is_strictly_read_only() {
-    let case = FIXTURE_CASES[1];
-    let path = case.path();
-    let path_str = path.to_str().unwrap();
-    let vfs = SqlCipherVfs::new(&path, case.profile, case.passphrase).unwrap();
-    let mut file = Vfs::open(&vfs, path_str, OpenFlags::READ_ONLY).unwrap();
-    let wal_path = companion_path_string(path_str, WAL_SUFFIX);
+    for case in FIXTURE_CASES {
+        let path = case.path();
+        let path_str = path.to_str().unwrap();
+        let vfs = SqlCipherVfs::new(&path, case.cipher_config(), case.passphrase).unwrap();
+        let mut file = Vfs::open(&vfs, path_str, OpenFlags::READ_ONLY).unwrap();
+        let wal_path = companion_path_string(path_str, WAL_SUFFIX);
 
-    assert!(Vfs::exists(&vfs, path_str).unwrap());
-    assert!(!Vfs::exists(&vfs, &wal_path).unwrap());
-    assert_eq!(file.size().unwrap(), fs::metadata(&path).unwrap().len());
-    assert!(file.sync().is_ok());
-    assert!(matches!(
-        file.write_all_at(b"no", 0),
-        Err(GraphiteError::Error(message)) if message == READ_ONLY_ERROR
-    ));
-    assert!(matches!(
-        file.truncate(0),
-        Err(GraphiteError::Error(message)) if message == READ_ONLY_ERROR
-    ));
-    assert!(matches!(
-        Vfs::delete(&vfs, path_str),
-        Err(GraphiteError::Error(message)) if message == READ_ONLY_ERROR
-    ));
-    assert!(matches!(
-        Vfs::open(&vfs, path_str, OpenFlags::READ_WRITE),
-        Err(GraphiteError::Error(message)) if message == READ_ONLY_ERROR
-    ));
+        assert!(Vfs::exists(&vfs, path_str).unwrap());
+        assert!(!Vfs::exists(&vfs, &wal_path).unwrap());
+        assert_eq!(file.size().unwrap(), fs::metadata(&path).unwrap().len());
+        assert!(file.sync().is_ok());
+        assert!(matches!(
+            file.write_all_at(b"no", 0),
+            Err(GraphiteError::Error(message)) if message == READ_ONLY_ERROR
+        ));
+        assert!(matches!(
+            file.truncate(0),
+            Err(GraphiteError::Error(message)) if message == READ_ONLY_ERROR
+        ));
+        assert!(matches!(
+            Vfs::delete(&vfs, path_str),
+            Err(GraphiteError::Error(message)) if message == READ_ONLY_ERROR
+        ));
+        assert!(matches!(
+            Vfs::open(&vfs, path_str, OpenFlags::READ_WRITE),
+            Err(GraphiteError::Error(message)) if message == READ_ONLY_ERROR
+        ));
+    }
 }
 
 #[test]
@@ -151,7 +188,7 @@ fn rejects_companion_files_before_opening_the_database() {
     assert!(matches!(
         open_readonly(
             &database_path,
-            CompatibilityProfile::SqlCipher4,
+            CipherPreset::SqlCipher4.into(),
             SQLCIPHER4_PASSPHRASE,
         ),
         Err(GraphiteAdapterError::Companion(CompanionError::UnsupportedWal { path }))
@@ -163,7 +200,7 @@ fn rejects_companion_files_before_opening_the_database() {
     assert!(matches!(
         open_readonly(
             &database_path,
-            CompatibilityProfile::SqlCipher4,
+            CipherPreset::SqlCipher4.into(),
             SQLCIPHER4_PASSPHRASE,
         ),
         Err(GraphiteAdapterError::Companion(CompanionError::UnsupportedJournal { path }))

@@ -2,13 +2,13 @@ use std::num::NonZeroU32;
 
 use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::NoPadding};
 use hmac::{KeyInit, Mac};
-use pbkdf2::pbkdf2_hmac_array;
+use pbkdf2::pbkdf2_hmac;
 use sha1::Sha1;
-use sha2::Sha512;
+use sha2::{Sha256, Sha512};
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::profile::{CipherParams, CompatibilityProfile, HashAlgorithm};
+use crate::config::{CipherConfig, HashAlgorithm};
 
 const SQLITE_HEADER_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 const AES_BLOCK_SIZE: usize = 16;
@@ -20,7 +20,7 @@ struct KeyMaterial {
 }
 
 pub(crate) struct PageDecryptor {
-    params: CipherParams,
+    config: CipherConfig,
     keys: KeyMaterial,
 }
 
@@ -50,7 +50,7 @@ pub enum DecryptError {
 
 impl PageDecryptor {
     pub(crate) fn new(
-        profile: CompatibilityProfile,
+        config: CipherConfig,
         passphrase: &[u8],
         salt: &[u8; 16],
     ) -> Result<Self, DecryptError> {
@@ -58,30 +58,36 @@ impl PageDecryptor {
             return Err(DecryptError::EmptyPassphrase);
         }
 
-        let params = profile.params();
-
-        let encryption_key = Self::derive_key(
-            params.kdf_algorithm,
+        let mut keys = KeyMaterial {
+            encryption_key: [0; 32],
+            hmac_key: [0; 32],
+        };
+        let hmac_salt: [u8; 16] = std::array::from_fn(|index| salt[index] ^ 0x3a);
+        let KeyMaterial {
+            encryption_key,
+            hmac_key,
+        } = &mut keys;
+        Self::derive_key_into(
+            config.kdf_algorithm(),
             passphrase,
             salt,
-            params.kdf_iterations,
+            config.kdf_iterations(),
+            encryption_key,
         );
-        let hmac_salt: [u8; 16] = std::array::from_fn(|index| salt[index] ^ 0x3a);
+        Self::derive_key_into(
+            config.kdf_algorithm(),
+            encryption_key,
+            &hmac_salt,
+            2,
+            hmac_key,
+        );
 
-        let hmac_key = Self::derive_key(params.kdf_algorithm, &encryption_key, &hmac_salt, 2);
-
-        Ok(Self {
-            params,
-            keys: KeyMaterial {
-                encryption_key,
-                hmac_key,
-            },
-        })
+        Ok(Self { config, keys })
     }
 
     #[must_use]
     pub(crate) const fn page_size(&self) -> usize {
-        self.params.page_size
+        self.config.page_size()
     }
 
     pub(crate) fn decrypt_page_into(
@@ -90,7 +96,7 @@ impl PageDecryptor {
         encrypted_page: &[u8],
         output: &mut [u8],
     ) -> Result<(), DecryptError> {
-        let expected = self.params.page_size;
+        let expected = self.config.page_size();
         if encrypted_page.len() != expected {
             return Err(DecryptError::InvalidEncryptedPageLength {
                 expected,
@@ -108,7 +114,7 @@ impl PageDecryptor {
 
         let page_number = page_no.get();
         let ciphertext_offset = if page_number == 1 { 16 } else { 0 };
-        let ciphertext_len = self.params.page_size - ciphertext_offset - self.params.reserve_size;
+        let ciphertext_len = self.config.usable_end() - ciphertext_offset;
         if !ciphertext_len.is_multiple_of(AES_BLOCK_SIZE) {
             return Err(DecryptError::InvalidCiphertextLength {
                 page_no: page_number,
@@ -117,7 +123,7 @@ impl PageDecryptor {
 
         let ciphertext_end = ciphertext_offset + ciphertext_len;
         let iv_end = ciphertext_end + AES_BLOCK_SIZE;
-        let hmac_end = iv_end + self.params.hmac_algorithm.output_len();
+        let hmac_end = iv_end + self.config.hmac_algorithm().output_len();
 
         let ciphertext = &encrypted_page[ciphertext_offset..ciphertext_end];
         let iv = &encrypted_page[ciphertext_end..iv_end];
@@ -150,19 +156,19 @@ impl PageDecryptor {
             } else {
                 usize::from(encoded_page_size)
             };
-            if sqlite_page_size != self.params.page_size {
+            if sqlite_page_size != self.config.page_size() {
                 output.zeroize();
                 return Err(DecryptError::InvalidSqlitePageSize {
-                    expected: self.params.page_size,
+                    expected: self.config.page_size(),
                     actual: sqlite_page_size,
                 });
             }
 
             let sqlite_reserve_size = usize::from(output[20]);
-            if sqlite_reserve_size != self.params.reserve_size {
+            if sqlite_reserve_size != self.config.reserve_size() {
                 output.zeroize();
                 return Err(DecryptError::InvalidSqliteReserveSize {
-                    expected: self.params.reserve_size,
+                    expected: self.config.reserve_size(),
                     actual: sqlite_reserve_size,
                 });
             }
@@ -171,15 +177,17 @@ impl PageDecryptor {
         Ok(())
     }
 
-    fn derive_key(
+    fn derive_key_into(
         algorithm: HashAlgorithm,
         password: &[u8],
         salt: &[u8],
         iterations: u32,
-    ) -> [u8; 32] {
+        output: &mut [u8; 32],
+    ) {
         match algorithm {
-            HashAlgorithm::Sha1 => pbkdf2_hmac_array::<Sha1, 32>(password, salt, iterations),
-            HashAlgorithm::Sha512 => pbkdf2_hmac_array::<Sha512, 32>(password, salt, iterations),
+            HashAlgorithm::Sha1 => pbkdf2_hmac::<Sha1>(password, salt, iterations, output),
+            HashAlgorithm::Sha256 => pbkdf2_hmac::<Sha256>(password, salt, iterations, output),
+            HashAlgorithm::Sha512 => pbkdf2_hmac::<Sha512>(password, salt, iterations, output),
         }
     }
 
@@ -190,9 +198,21 @@ impl PageDecryptor {
         page_number: u32,
         stored_hmac: &[u8],
     ) -> Result<(), DecryptError> {
-        match self.params.hmac_algorithm {
+        match self.config.hmac_algorithm() {
             HashAlgorithm::Sha1 => {
                 let mac = hmac::Hmac::<Sha1>::new_from_slice(&self.keys.hmac_key)
+                    .map_err(|_| DecryptError::CryptoInitializationFailed)?
+                    .chain_update(ciphertext)
+                    .chain_update(iv)
+                    .chain_update(page_number.to_le_bytes());
+
+                mac.verify_slice(stored_hmac)
+                    .map_err(|_| DecryptError::AuthenticationFailed {
+                        page_no: page_number,
+                    })
+            }
+            HashAlgorithm::Sha256 => {
+                let mac = hmac::Hmac::<Sha256>::new_from_slice(&self.keys.hmac_key)
                     .map_err(|_| DecryptError::CryptoInitializationFailed)?
                     .chain_update(ciphertext)
                     .chain_update(iv)

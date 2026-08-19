@@ -4,7 +4,7 @@ use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::decryptor::PageDecryptor;
-use crate::{CompatibilityProfile, DecryptError, ReadAt};
+use crate::{CipherConfig, DecryptError, ReadAt};
 
 const DATABASE_SALT_SIZE: usize = 16;
 
@@ -46,11 +46,11 @@ pub struct SqlCipherReader<R> {
 impl<R: ReadAt> SqlCipherReader<R> {
     pub fn open(
         source: R,
-        profile: CompatibilityProfile,
+        config: CipherConfig,
         passphrase: &[u8],
     ) -> Result<Self, ReaderError<R::Error>> {
         let file_size = source.len().map_err(ReaderError::Source)?;
-        let page_size = profile.page_size();
+        let page_size = config.page_size();
         let page_size_u64 = page_size as u64;
 
         if file_size == 0 {
@@ -78,7 +78,7 @@ impl<R: ReadAt> SqlCipherReader<R> {
         source
             .read_exact_at(0, &mut salt)
             .map_err(ReaderError::Source)?;
-        let decryptor = PageDecryptor::new(profile, passphrase, &salt)?;
+        let decryptor = PageDecryptor::new(config, passphrase, &salt)?;
 
         Ok(Self {
             source,

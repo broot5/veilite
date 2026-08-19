@@ -10,7 +10,7 @@ use graphitesql::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-use veilite_core::{CompatibilityProfile, DecryptError, FileSource, ReaderError, SqlCipherReader};
+use veilite_core::{CipherConfig, DecryptError, FileSource, ReaderError, SqlCipherReader};
 
 #[cfg(test)]
 use crate::companion::companion_path;
@@ -49,11 +49,11 @@ pub enum Value {
     Blob(Vec<u8>),
 }
 
-pub struct ReadonlyConnection {
+pub struct ReadOnlyConnection {
     inner: GraphiteConnection,
 }
 
-impl ReadonlyConnection {
+impl ReadOnlyConnection {
     pub fn query(&self, sql: &str) -> Result<QueryResult, GraphiteAdapterError> {
         self.inner
             .query(sql)
@@ -64,13 +64,13 @@ impl ReadonlyConnection {
     }
 }
 
-pub struct SqlCipherFile {
+struct SqlCipherFile {
     reader: SqlCipherReader<FileSource>,
 }
 
 impl SqlCipherFile {
     #[must_use]
-    pub fn new(reader: SqlCipherReader<FileSource>) -> Self {
+    fn new(reader: SqlCipherReader<FileSource>) -> Self {
         Self { reader }
     }
 }
@@ -99,17 +99,17 @@ impl File for SqlCipherFile {
     }
 }
 
-pub struct SqlCipherVfs {
+struct SqlCipherVfs {
     main_path: PathBuf,
     main_path_utf8: String,
-    profile: CompatibilityProfile,
+    config: CipherConfig,
     passphrase: Zeroizing<Vec<u8>>,
 }
 
 impl SqlCipherVfs {
-    pub fn new(
+    fn new(
         path: impl AsRef<Path>,
-        profile: CompatibilityProfile,
+        config: CipherConfig,
         passphrase: &[u8],
     ) -> Result<Self, GraphiteAdapterError> {
         let main_path = path.as_ref().to_path_buf();
@@ -123,12 +123,12 @@ impl SqlCipherVfs {
         Ok(Self {
             main_path,
             main_path_utf8,
-            profile,
+            config,
             passphrase: Zeroizing::new(passphrase.to_vec()),
         })
     }
 
-    pub fn open_readonly(&self) -> Result<ReadonlyConnection, GraphiteAdapterError> {
+    fn open_readonly(&self) -> Result<ReadOnlyConnection, GraphiteAdapterError> {
         check_companion_files(&self.main_path)?;
         let inner =
             GraphiteConnection::open_readonly_vfs(self, &self.main_path_utf8).map_err(|error| {
@@ -136,7 +136,7 @@ impl SqlCipherVfs {
                     message: error.to_string(),
                 }
             })?;
-        Ok(ReadonlyConnection { inner })
+        Ok(ReadOnlyConnection { inner })
     }
 }
 
@@ -163,7 +163,7 @@ impl Vfs for SqlCipherVfs {
             io::ErrorKind::NotFound => GraphiteError::CantOpen(path.to_owned()),
             _ => GraphiteError::Io(error.to_string()),
         })?;
-        let reader = SqlCipherReader::open(source, self.profile, self.passphrase.as_slice())
+        let reader = SqlCipherReader::open(source, self.config, self.passphrase.as_slice())
             .map_err(map_reader_error)?;
 
         Ok(Box::new(SqlCipherFile::new(reader)))
@@ -184,10 +184,10 @@ impl Vfs for SqlCipherVfs {
 
 pub fn open_readonly(
     path: impl AsRef<Path>,
-    profile: CompatibilityProfile,
+    config: CipherConfig,
     passphrase: &[u8],
-) -> Result<ReadonlyConnection, GraphiteAdapterError> {
-    SqlCipherVfs::new(path, profile, passphrase)?.open_readonly()
+) -> Result<ReadOnlyConnection, GraphiteAdapterError> {
+    SqlCipherVfs::new(path, config, passphrase)?.open_readonly()
 }
 
 fn convert_query_result(result: GraphiteQueryResult) -> QueryResult {

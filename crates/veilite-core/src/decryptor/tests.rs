@@ -4,42 +4,92 @@ use std::sync::OnceLock;
 use zeroize::Zeroizing;
 
 use super::*;
+use crate::CipherPreset;
 
 const SQLCIPHER3_FIXTURE: &[u8] = include_bytes!("../../../../fixtures/sqlcipher3/encrypted.db");
 const SQLCIPHER3_PASSPHRASE: &[u8] = b"veilite-sqlcipher3-test-key";
 const SQLCIPHER4_FIXTURE: &[u8] = include_bytes!("../../../../fixtures/sqlcipher4/encrypted.db");
 const SQLCIPHER4_PASSPHRASE: &[u8] = b"veilite-sqlcipher4-test-key";
+const SQLCIPHER_CUSTOM_FIXTURE: &[u8] =
+    include_bytes!("../../../../fixtures/sqlcipher-custom/encrypted.db");
+const SQLCIPHER_CUSTOM_PASSPHRASE: &[u8] = b"veilite-sqlcipher-custom-test-key";
+
+#[derive(Debug, Clone, Copy)]
+enum FixtureCipher {
+    SqlCipher3,
+    SqlCipher4,
+    Custom,
+}
+
+impl FixtureCipher {
+    fn config(self) -> CipherConfig {
+        match self {
+            Self::SqlCipher3 => CipherPreset::SqlCipher3.into(),
+            Self::SqlCipher4 => CipherPreset::SqlCipher4.into(),
+            Self::Custom => {
+                CipherConfig::new(2048, 100_000, HashAlgorithm::Sha256, HashAlgorithm::Sha256)
+                    .expect("custom fixture configuration is valid")
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct FixtureCase {
-    profile: CompatibilityProfile,
+    cipher: FixtureCipher,
     fixture: &'static [u8],
     page_size: usize,
     reserve_size: usize,
 }
 
-const FIXTURE_CASES: [FixtureCase; 2] = [
+const FIXTURE_CASES: [FixtureCase; 3] = [
     FixtureCase {
-        profile: CompatibilityProfile::SqlCipher3,
+        cipher: FixtureCipher::SqlCipher3,
         fixture: SQLCIPHER3_FIXTURE,
         page_size: 1024,
         reserve_size: 48,
     },
     FixtureCase {
-        profile: CompatibilityProfile::SqlCipher4,
+        cipher: FixtureCipher::SqlCipher4,
         fixture: SQLCIPHER4_FIXTURE,
         page_size: 4096,
         reserve_size: 80,
     },
+    FixtureCase {
+        cipher: FixtureCipher::Custom,
+        fixture: SQLCIPHER_CUSTOM_FIXTURE,
+        page_size: 2048,
+        reserve_size: 48,
+    },
 ];
 
 impl FixtureCase {
+    fn cipher_config(self) -> CipherConfig {
+        self.cipher.config()
+    }
+
     fn page_decryptor(self) -> &'static PageDecryptor {
-        match self.profile {
-            CompatibilityProfile::SqlCipher3 => sqlcipher3_page_decryptor(),
-            CompatibilityProfile::SqlCipher4 => sqlcipher4_page_decryptor(),
+        match self.cipher {
+            FixtureCipher::SqlCipher3 => sqlcipher3_page_decryptor(),
+            FixtureCipher::SqlCipher4 => sqlcipher4_page_decryptor(),
+            FixtureCipher::Custom => sqlcipher_custom_page_decryptor(),
         }
     }
+}
+
+fn sqlcipher_custom_page_decryptor() -> &'static PageDecryptor {
+    static DECRYPTOR: OnceLock<PageDecryptor> = OnceLock::new();
+    DECRYPTOR.get_or_init(|| {
+        let salt: &[u8; 16] = SQLCIPHER_CUSTOM_FIXTURE[..16]
+            .try_into()
+            .expect("fixture has a salt");
+        PageDecryptor::new(
+            FixtureCipher::Custom.config(),
+            SQLCIPHER_CUSTOM_PASSPHRASE,
+            salt,
+        )
+        .expect("fixture passphrase is non-empty")
+    })
 }
 
 fn sqlcipher3_page_decryptor() -> &'static PageDecryptor {
@@ -49,7 +99,7 @@ fn sqlcipher3_page_decryptor() -> &'static PageDecryptor {
             .try_into()
             .expect("fixture has a salt");
         PageDecryptor::new(
-            CompatibilityProfile::SqlCipher3,
+            CipherConfig::from(CipherPreset::SqlCipher3),
             SQLCIPHER3_PASSPHRASE,
             salt,
         )
@@ -64,7 +114,7 @@ fn sqlcipher4_page_decryptor() -> &'static PageDecryptor {
             .try_into()
             .expect("fixture has a salt");
         PageDecryptor::new(
-            CompatibilityProfile::SqlCipher4,
+            CipherConfig::from(CipherPreset::SqlCipher4),
             SQLCIPHER4_PASSPHRASE,
             salt,
         )
@@ -106,12 +156,22 @@ fn first_page_with_changed_header_byte(
     let mut page = case.fixture[..page_size].to_vec();
     let ciphertext_end = page_size - case.reserve_size;
     let iv_end = ciphertext_end + AES_BLOCK_SIZE;
-    let hmac_end = iv_end + decryptor.params.hmac_algorithm.output_len();
+    let hmac_end = iv_end + decryptor.config.hmac_algorithm().output_len();
     page[ciphertext_end + header_offset - 16] ^= original ^ replacement;
 
-    match decryptor.params.hmac_algorithm {
+    match decryptor.config.hmac_algorithm() {
         HashAlgorithm::Sha1 => {
             let tag = hmac::Hmac::<Sha1>::new_from_slice(&decryptor.keys.hmac_key)
+                .unwrap()
+                .chain_update(&page[16..ciphertext_end])
+                .chain_update(&page[ciphertext_end..iv_end])
+                .chain_update(1_u32.to_le_bytes())
+                .finalize()
+                .into_bytes();
+            page[iv_end..hmac_end].copy_from_slice(&tag);
+        }
+        HashAlgorithm::Sha256 => {
+            let tag = hmac::Hmac::<Sha256>::new_from_slice(&decryptor.keys.hmac_key)
                 .unwrap()
                 .chain_update(&page[16..ciphertext_end])
                 .chain_update(&page[ciphertext_end..iv_end])
@@ -138,12 +198,12 @@ fn first_page_with_changed_header_byte(
 fn decrypts_supported_fixtures() {
     for case in FIXTURE_CASES {
         let plaintext = decrypt_fixture_pages(case.page_decryptor(), case.fixture)
-            .unwrap_or_else(|error| panic!("{:?}: {error}", case.profile));
+            .unwrap_or_else(|error| panic!("{:?}: {error}", case.cipher));
         let page_size = case.page_size;
         let reserve_size = case.reserve_size;
 
         assert_eq!(case.page_decryptor().page_size(), page_size);
-        assert_eq!(case.profile.page_size(), page_size);
+        assert_eq!(case.cipher_config().page_size(), page_size);
         assert_eq!(plaintext.len(), case.fixture.len());
         assert_eq!(&plaintext[..16], SQLITE_HEADER_MAGIC);
         assert_eq!(
@@ -189,7 +249,7 @@ fn ignores_unauthenticated_sqlcipher3_filler() {
 fn rejects_wrong_passphrase() {
     for case in FIXTURE_CASES {
         let salt: &[u8; 16] = case.fixture[..16].try_into().unwrap();
-        let wrong = PageDecryptor::new(case.profile, b"wrong passphrase", salt).unwrap();
+        let wrong = PageDecryptor::new(case.cipher_config(), b"wrong passphrase", salt).unwrap();
         let mut output = vec![0; case.page_size];
 
         assert_eq!(
@@ -305,10 +365,71 @@ fn rejects_empty_passphrase() {
         let salt: &[u8; 16] = case.fixture[..16].try_into().unwrap();
 
         assert!(matches!(
-            PageDecryptor::new(case.profile, b"", salt),
+            PageDecryptor::new(case.cipher_config(), b"", salt),
             Err(DecryptError::EmptyPassphrase)
         ));
     }
+}
+
+#[test]
+fn derives_a_sha256_key_from_a_known_answer() {
+    let mut actual = [0; 32];
+    PageDecryptor::derive_key_into(HashAlgorithm::Sha256, b"password", b"salt", 1, &mut actual);
+    let expected = [
+        0x12, 0x0f, 0xb6, 0xcf, 0xfc, 0xf8, 0xb3, 0x2c, 0x43, 0xe7, 0x22, 0x52, 0x56, 0xc4, 0xf8,
+        0x37, 0xa8, 0x65, 0x48, 0xc9, 0x2c, 0xcc, 0x35, 0x48, 0x08, 0x05, 0x98, 0x7c, 0xb7, 0x0b,
+        0xe1, 0x7b,
+    ];
+
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn verifies_a_sha256_page_hmac_from_a_known_answer() {
+    let config = CipherConfig::new(1024, 1, HashAlgorithm::Sha256, HashAlgorithm::Sha256).unwrap();
+    let salt = std::array::from_fn(|index| u8::try_from(index).unwrap());
+    let decryptor = PageDecryptor::new(config, b"password", &salt).unwrap();
+    let iv: [u8; 16] = std::array::from_fn(|index| u8::try_from(index + 16).unwrap());
+    let stored_hmac = [
+        0xed, 0xc3, 0x46, 0x9a, 0xd1, 0x18, 0x1f, 0x7c, 0x31, 0x14, 0xfe, 0x0d, 0x19, 0x30, 0x34,
+        0xf2, 0xca, 0x32, 0x88, 0x8d, 0x87, 0xb8, 0x7e, 0x47, 0x31, 0xa7, 0x43, 0x08, 0xf6, 0x74,
+        0x8e, 0xdb,
+    ];
+
+    decryptor
+        .verify_page_hmac(b"ciphertext", &iv, 7, &stored_hmac)
+        .unwrap();
+}
+
+#[test]
+fn derives_both_keys_with_the_selected_kdf_algorithm() {
+    let salt = [0x42; 16];
+    let sha1_hmac = PageDecryptor::new(
+        CipherConfig::new(1024, 2, HashAlgorithm::Sha256, HashAlgorithm::Sha1).unwrap(),
+        b"passphrase",
+        &salt,
+    )
+    .unwrap();
+    let sha512_hmac = PageDecryptor::new(
+        CipherConfig::new(1024, 2, HashAlgorithm::Sha256, HashAlgorithm::Sha512).unwrap(),
+        b"passphrase",
+        &salt,
+    )
+    .unwrap();
+    let sha1_kdf = PageDecryptor::new(
+        CipherConfig::new(1024, 2, HashAlgorithm::Sha1, HashAlgorithm::Sha256).unwrap(),
+        b"passphrase",
+        &salt,
+    )
+    .unwrap();
+
+    assert_eq!(
+        sha1_hmac.keys.encryption_key,
+        sha512_hmac.keys.encryption_key
+    );
+    assert_eq!(sha1_hmac.keys.hmac_key, sha512_hmac.keys.hmac_key);
+    assert_ne!(sha1_hmac.keys.encryption_key, sha1_kdf.keys.encryption_key);
+    assert_ne!(sha1_hmac.keys.hmac_key, sha1_kdf.keys.hmac_key);
 }
 
 #[test]

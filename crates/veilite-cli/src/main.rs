@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-use veilite_core::{CompatibilityProfile, FileSource, SqlCipherReader};
+use veilite_core::{CipherConfig, CipherPreset, FileSource, HashAlgorithm, SqlCipherReader};
 use veilite_graphitesql::{QueryResult, Value, check_companion_files, open_readonly};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -23,7 +23,7 @@ enum Command {
     /// Decrypt a database into a SQLite file
     Export(ExportArgs),
 
-    /// Show encrypted database and compatibility profile information
+    /// Show encrypted database and cipher configuration information
     Inspect(InspectArgs),
 
     /// Execute a read-only SQL query
@@ -35,9 +35,8 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct ExportArgs {
-    /// SQLCipher on-disk compatibility profile
-    #[arg(long, value_enum, value_name = "PROFILE")]
-    compatibility: CompatibilityArg,
+    #[command(flatten)]
+    cipher: CipherArgs,
 
     #[command(flatten)]
     passphrase: PassphraseArgs,
@@ -53,9 +52,8 @@ struct ExportArgs {
 
 #[derive(Debug, Args)]
 struct InspectArgs {
-    /// SQLCipher on-disk compatibility profile
-    #[arg(long, value_enum, value_name = "PROFILE")]
-    compatibility: CompatibilityArg,
+    #[command(flatten)]
+    cipher: CipherArgs,
 
     /// SQLCipher encrypted main database
     #[arg(value_name = "ENCRYPTED_DB")]
@@ -64,9 +62,8 @@ struct InspectArgs {
 
 #[derive(Debug, Args)]
 struct QueryArgs {
-    /// SQLCipher on-disk compatibility profile
-    #[arg(long, value_enum, value_name = "PROFILE")]
-    compatibility: CompatibilityArg,
+    #[command(flatten)]
+    cipher: CipherArgs,
 
     #[command(flatten)]
     passphrase: PassphraseArgs,
@@ -82,9 +79,8 @@ struct QueryArgs {
 
 #[derive(Debug, Args)]
 struct VerifyArgs {
-    /// SQLCipher on-disk compatibility profile
-    #[arg(long, value_enum, value_name = "PROFILE")]
-    compatibility: CompatibilityArg,
+    #[command(flatten)]
+    cipher: CipherArgs,
 
     #[command(flatten)]
     passphrase: PassphraseArgs,
@@ -101,19 +97,82 @@ struct PassphraseArgs {
     passphrase_file: Option<PathBuf>,
 }
 
+#[derive(Debug, Args)]
+struct CipherArgs {
+    /// SQLCipher on-disk compatibility preset
+    #[arg(
+        long,
+        value_enum,
+        value_name = "PRESET",
+        required_unless_present = "page_size",
+        conflicts_with_all = ["page_size", "kdf_iterations", "kdf_algorithm", "hmac_algorithm"]
+    )]
+    compatibility: Option<CipherPresetArg>,
+
+    /// Cipher page size for a complete custom configuration
+    #[arg(
+        long,
+        value_name = "BYTES",
+        required_unless_present = "compatibility",
+        requires_all = ["kdf_iterations", "kdf_algorithm", "hmac_algorithm"]
+    )]
+    page_size: Option<usize>,
+
+    /// Encryption key derivation iteration count
+    #[arg(long, value_name = "COUNT", requires = "page_size")]
+    kdf_iterations: Option<u32>,
+
+    /// PBKDF2-HMAC algorithm for encryption and HMAC key derivation
+    #[arg(long, value_enum, value_name = "ALGORITHM", requires = "page_size")]
+    kdf_algorithm: Option<HashAlgorithmArg>,
+
+    /// HMAC algorithm for page authentication
+    #[arg(long, value_enum, value_name = "ALGORITHM", requires = "page_size")]
+    hmac_algorithm: Option<HashAlgorithmArg>,
+}
+
+impl CipherArgs {
+    fn config(&self) -> Result<CipherConfig, Box<dyn Error>> {
+        if let Some(compatibility) = self.compatibility {
+            return Ok(compatibility.preset().into());
+        }
+
+        let (Some(page_size), Some(kdf_iterations), Some(kdf_algorithm), Some(hmac_algorithm)) = (
+            self.page_size,
+            self.kdf_iterations,
+            self.kdf_algorithm,
+            self.hmac_algorithm,
+        ) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "custom cipher configuration is incomplete",
+            )
+            .into());
+        };
+
+        CipherConfig::new(
+            page_size,
+            kdf_iterations,
+            kdf_algorithm.into(),
+            hmac_algorithm.into(),
+        )
+        .map_err(Into::into)
+    }
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum CompatibilityArg {
+enum CipherPresetArg {
     #[value(name = "3")]
     V3,
     #[value(name = "4")]
     V4,
 }
 
-impl CompatibilityArg {
-    const fn profile(self) -> CompatibilityProfile {
+impl CipherPresetArg {
+    const fn preset(self) -> CipherPreset {
         match self {
-            Self::V3 => CompatibilityProfile::SqlCipher3,
-            Self::V4 => CompatibilityProfile::SqlCipher4,
+            Self::V3 => CipherPreset::SqlCipher3,
+            Self::V4 => CipherPreset::SqlCipher4,
         }
     }
 
@@ -125,12 +184,29 @@ impl CompatibilityArg {
     }
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum HashAlgorithmArg {
+    Sha1,
+    Sha256,
+    Sha512,
+}
+
+impl From<HashAlgorithmArg> for HashAlgorithm {
+    fn from(algorithm: HashAlgorithmArg) -> Self {
+        match algorithm {
+            HashAlgorithmArg::Sha1 => Self::Sha1,
+            HashAlgorithmArg::Sha256 => Self::Sha256,
+            HashAlgorithmArg::Sha512 => Self::Sha512,
+        }
+    }
+}
+
 fn validate_encrypted_file_size(file_size: u64, page_size: u64) -> io::Result<()> {
     if file_size < page_size {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "encrypted database is shorter than one page for the selected compatibility profile: {file_size} bytes"
+                "encrypted database is shorter than one page for the selected cipher configuration: {file_size} bytes"
             ),
         ));
     }
@@ -155,11 +231,11 @@ fn run() -> Result<(), Box<dyn Error>> {
 }
 
 fn export(args: ExportArgs) -> Result<(), Box<dyn Error>> {
+    let config = args.cipher.config()?;
     check_companion_files(&args.input_path)?;
     let passphrase = read_passphrase(&args.passphrase)?;
     let source = FileSource::open(&args.input_path)?;
-    let reader =
-        SqlCipherReader::open(source, args.compatibility.profile(), passphrase.as_slice())?;
+    let reader = SqlCipherReader::open(source, config, passphrase.as_slice())?;
     drop(passphrase);
 
     write_decrypted_database(&args.output_path, &reader)?;
@@ -202,6 +278,7 @@ fn write_decrypted_database(
 }
 
 fn inspect(args: InspectArgs) -> Result<(), Box<dyn Error>> {
+    let config = args.cipher.config()?;
     let metadata = fs::metadata(&args.input_path)?;
     if !metadata.is_file() {
         return Err(io::Error::new(
@@ -212,16 +289,32 @@ fn inspect(args: InspectArgs) -> Result<(), Box<dyn Error>> {
     }
 
     let file_size = metadata.len();
-    let page_size = args.compatibility.profile().page_size() as u64;
+    let page_size = config.page_size() as u64;
     validate_encrypted_file_size(file_size, page_size)?;
 
     let wal_path = companion_path(&args.input_path, "-wal");
     let journal_path = companion_path(&args.input_path, "-journal");
 
     println!("path: {}", args.input_path.display());
-    println!("compatibility: {}", args.compatibility.number());
+    match args.cipher.compatibility {
+        Some(compatibility) => {
+            println!("configuration: preset");
+            println!("compatibility: {}", compatibility.number());
+        }
+        None => println!("configuration: custom"),
+    }
     println!("file size: {file_size} bytes");
     println!("page size: {page_size} bytes");
+    println!("KDF iterations: {}", config.kdf_iterations());
+    println!(
+        "KDF algorithm: {}",
+        hash_algorithm_name(config.kdf_algorithm())
+    );
+    println!(
+        "HMAC algorithm: {}",
+        hash_algorithm_name(config.hmac_algorithm())
+    );
+    println!("reserve size: {} bytes", config.reserve_size());
     println!("page count: {}", file_size / page_size);
     println!("WAL: {}", presence(&wal_path)?);
     println!("journal: {}", presence(&journal_path)?);
@@ -229,12 +322,9 @@ fn inspect(args: InspectArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn query(args: QueryArgs) -> Result<(), Box<dyn Error>> {
+    let config = args.cipher.config()?;
     let passphrase = read_passphrase(&args.passphrase)?;
-    let connection = open_readonly(
-        &args.input_path,
-        args.compatibility.profile(),
-        passphrase.as_slice(),
-    )?;
+    let connection = open_readonly(&args.input_path, config, passphrase.as_slice())?;
     drop(passphrase);
     let result = connection.query(&args.sql)?;
 
@@ -244,11 +334,11 @@ fn query(args: QueryArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn verify(args: VerifyArgs) -> Result<(), Box<dyn Error>> {
+    let config = args.cipher.config()?;
     check_companion_files(&args.input_path)?;
     let passphrase = read_passphrase(&args.passphrase)?;
     let source = FileSource::open(&args.input_path)?;
-    let reader =
-        SqlCipherReader::open(source, args.compatibility.profile(), passphrase.as_slice())?;
+    let reader = SqlCipherReader::open(source, config, passphrase.as_slice())?;
     drop(passphrase);
     let mut plaintext_page = Zeroizing::new(vec![0; reader.page_size()]);
 
@@ -259,6 +349,14 @@ fn verify(args: VerifyArgs) -> Result<(), Box<dyn Error>> {
 
     println!("verified {} pages", reader.page_count());
     Ok(())
+}
+
+const fn hash_algorithm_name(algorithm: HashAlgorithm) -> &'static str {
+    match algorithm {
+        HashAlgorithm::Sha1 => "sha1",
+        HashAlgorithm::Sha256 => "sha256",
+        HashAlgorithm::Sha512 => "sha512",
+    }
 }
 
 fn nonzero_page_number(page_no: u32) -> io::Result<NonZeroU32> {
@@ -370,6 +468,125 @@ mod tests {
     #[test]
     fn verifies_cli_definition() {
         CliArgs::command().debug_assert();
+    }
+
+    fn parse_cipher_config(args: &[&str]) -> Result<CipherConfig, Box<dyn Error>> {
+        let parsed = CliArgs::try_parse_from(args)?;
+        match parsed.command {
+            Command::Export(args) => args.cipher.config(),
+            Command::Inspect(args) => args.cipher.config(),
+            Command::Query(args) => args.cipher.config(),
+            Command::Verify(args) => args.cipher.config(),
+        }
+    }
+
+    #[test]
+    fn accepts_preset_configuration_for_every_command() {
+        for args in [
+            vec![
+                "veilite",
+                "export",
+                "--compatibility",
+                "4",
+                "encrypted.db",
+                "plaintext.db",
+            ],
+            vec!["veilite", "inspect", "--compatibility", "4", "encrypted.db"],
+            vec![
+                "veilite",
+                "query",
+                "--compatibility",
+                "4",
+                "encrypted.db",
+                "SELECT 1",
+            ],
+            vec!["veilite", "verify", "--compatibility", "4", "encrypted.db"],
+        ] {
+            assert_eq!(
+                parse_cipher_config(&args).unwrap(),
+                CipherConfig::from(CipherPreset::SqlCipher4)
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_complete_custom_configuration_for_every_command() {
+        let expected =
+            CipherConfig::new(2048, 100_000, HashAlgorithm::Sha256, HashAlgorithm::Sha256).unwrap();
+        let custom = [
+            "--page-size",
+            "2048",
+            "--kdf-iterations",
+            "100000",
+            "--kdf-algorithm",
+            "sha256",
+            "--hmac-algorithm",
+            "sha256",
+        ];
+
+        for mut args in [
+            vec!["veilite", "export"],
+            vec!["veilite", "inspect"],
+            vec!["veilite", "query"],
+            vec!["veilite", "verify"],
+        ] {
+            args.extend(custom);
+            match args[1] {
+                "export" => args.extend(["encrypted.db", "plaintext.db"]),
+                "query" => args.extend(["encrypted.db", "SELECT 1"]),
+                _ => args.push("encrypted.db"),
+            }
+
+            assert_eq!(parse_cipher_config(&args).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn rejects_missing_partial_and_mixed_cipher_configuration() {
+        for args in [
+            vec!["veilite", "inspect", "encrypted.db"],
+            vec!["veilite", "inspect", "--page-size", "2048", "encrypted.db"],
+            vec![
+                "veilite",
+                "inspect",
+                "--compatibility",
+                "4",
+                "--page-size",
+                "2048",
+                "--kdf-iterations",
+                "100000",
+                "--kdf-algorithm",
+                "sha256",
+                "--hmac-algorithm",
+                "sha256",
+                "encrypted.db",
+            ],
+        ] {
+            assert!(CliArgs::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_structurally_invalid_custom_configuration() {
+        let error = parse_cipher_config(&[
+            "veilite",
+            "inspect",
+            "--page-size",
+            "513",
+            "--kdf-iterations",
+            "100000",
+            "--kdf-algorithm",
+            "sha256",
+            "--hmac-algorithm",
+            "sha256",
+            "encrypted.db",
+        ])
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid cipher page size 513: expected a power of two from 1024 to 65536"
+        );
     }
 
     #[test]

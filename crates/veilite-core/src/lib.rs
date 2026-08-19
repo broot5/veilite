@@ -1,9 +1,9 @@
+mod config;
 mod decryptor;
-mod profile;
 mod reader;
 mod source;
 
+pub use config::{CipherConfig, CipherConfigError, CipherPreset, HashAlgorithm};
 pub use decryptor::DecryptError;
-pub use profile::CompatibilityProfile;
 pub use reader::{ReaderError, SqlCipherReader};
 pub use source::{FileSource, ReadAt, SliceSource};
