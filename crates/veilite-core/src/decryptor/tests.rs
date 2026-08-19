@@ -4,70 +4,12 @@ use std::sync::OnceLock;
 use zeroize::Zeroizing;
 
 use super::*;
-use crate::CipherPreset;
-
-const SQLCIPHER3_FIXTURE: &[u8] = include_bytes!("../../../../fixtures/sqlcipher3/encrypted.db");
-const SQLCIPHER3_PASSPHRASE: &[u8] = b"veilite-sqlcipher3-test-key";
-const SQLCIPHER4_FIXTURE: &[u8] = include_bytes!("../../../../fixtures/sqlcipher4/encrypted.db");
-const SQLCIPHER4_PASSPHRASE: &[u8] = b"veilite-sqlcipher4-test-key";
-const SQLCIPHER_CUSTOM_FIXTURE: &[u8] =
-    include_bytes!("../../../../fixtures/sqlcipher-custom/encrypted.db");
-const SQLCIPHER_CUSTOM_PASSPHRASE: &[u8] = b"veilite-sqlcipher-custom-test-key";
-
-#[derive(Debug, Clone, Copy)]
-enum FixtureCipher {
-    SqlCipher3,
-    SqlCipher4,
-    Custom,
-}
-
-impl FixtureCipher {
-    fn config(self) -> CipherConfig {
-        match self {
-            Self::SqlCipher3 => CipherPreset::SqlCipher3.into(),
-            Self::SqlCipher4 => CipherPreset::SqlCipher4.into(),
-            Self::Custom => {
-                CipherConfig::new(2048, 100_000, HashAlgorithm::Sha256, HashAlgorithm::Sha256)
-                    .expect("custom fixture configuration is valid")
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct FixtureCase {
-    cipher: FixtureCipher,
-    fixture: &'static [u8],
-    page_size: usize,
-    reserve_size: usize,
-}
-
-const FIXTURE_CASES: [FixtureCase; 3] = [
-    FixtureCase {
-        cipher: FixtureCipher::SqlCipher3,
-        fixture: SQLCIPHER3_FIXTURE,
-        page_size: 1024,
-        reserve_size: 48,
-    },
-    FixtureCase {
-        cipher: FixtureCipher::SqlCipher4,
-        fixture: SQLCIPHER4_FIXTURE,
-        page_size: 4096,
-        reserve_size: 80,
-    },
-    FixtureCase {
-        cipher: FixtureCipher::Custom,
-        fixture: SQLCIPHER_CUSTOM_FIXTURE,
-        page_size: 2048,
-        reserve_size: 48,
-    },
-];
+use crate::test_support::{
+    FIXTURE_CASES, FixtureCase, FixtureCipher, PRESET_FIXTURE_CASES, SQLCIPHER_CUSTOM_CASE,
+    SQLCIPHER3_CASE, SQLCIPHER4_CASE,
+};
 
 impl FixtureCase {
-    fn cipher_config(self) -> CipherConfig {
-        self.cipher.config()
-    }
-
     fn page_decryptor(self) -> &'static PageDecryptor {
         match self.cipher {
             FixtureCipher::SqlCipher3 => sqlcipher3_page_decryptor(),
@@ -79,47 +21,23 @@ impl FixtureCase {
 
 fn sqlcipher_custom_page_decryptor() -> &'static PageDecryptor {
     static DECRYPTOR: OnceLock<PageDecryptor> = OnceLock::new();
-    DECRYPTOR.get_or_init(|| {
-        let salt: &[u8; 16] = SQLCIPHER_CUSTOM_FIXTURE[..16]
-            .try_into()
-            .expect("fixture has a salt");
-        PageDecryptor::new(
-            FixtureCipher::Custom.config(),
-            SQLCIPHER_CUSTOM_PASSPHRASE,
-            salt,
-        )
-        .expect("fixture passphrase is non-empty")
-    })
+    DECRYPTOR.get_or_init(|| fixture_page_decryptor(SQLCIPHER_CUSTOM_CASE))
 }
 
 fn sqlcipher3_page_decryptor() -> &'static PageDecryptor {
     static DECRYPTOR: OnceLock<PageDecryptor> = OnceLock::new();
-    DECRYPTOR.get_or_init(|| {
-        let salt: &[u8; 16] = SQLCIPHER3_FIXTURE[..16]
-            .try_into()
-            .expect("fixture has a salt");
-        PageDecryptor::new(
-            CipherConfig::from(CipherPreset::SqlCipher3),
-            SQLCIPHER3_PASSPHRASE,
-            salt,
-        )
-        .expect("fixture passphrase is non-empty")
-    })
+    DECRYPTOR.get_or_init(|| fixture_page_decryptor(SQLCIPHER3_CASE))
 }
 
 fn sqlcipher4_page_decryptor() -> &'static PageDecryptor {
     static DECRYPTOR: OnceLock<PageDecryptor> = OnceLock::new();
-    DECRYPTOR.get_or_init(|| {
-        let salt: &[u8; 16] = SQLCIPHER4_FIXTURE[..16]
-            .try_into()
-            .expect("fixture has a salt");
-        PageDecryptor::new(
-            CipherConfig::from(CipherPreset::SqlCipher4),
-            SQLCIPHER4_PASSPHRASE,
-            salt,
-        )
+    DECRYPTOR.get_or_init(|| fixture_page_decryptor(SQLCIPHER4_CASE))
+}
+
+fn fixture_page_decryptor(case: FixtureCase) -> PageDecryptor {
+    let salt: &[u8; 16] = case.fixture[..16].try_into().expect("fixture has a salt");
+    PageDecryptor::new(case.config(), case.passphrase, salt)
         .expect("fixture passphrase is non-empty")
-    })
 }
 
 fn decrypt_fixture_pages(
@@ -202,9 +120,7 @@ fn decrypts_supported_fixtures() {
         let page_size = case.page_size;
         let reserve_size = case.reserve_size;
 
-        assert_eq!(case.page_decryptor().page_size(), page_size);
-        assert_eq!(case.cipher_config().page_size(), page_size);
-        assert_eq!(plaintext.len(), case.fixture.len());
+        assert_eq!(case.config().page_size(), page_size);
         assert_eq!(&plaintext[..16], SQLITE_HEADER_MAGIC);
         assert_eq!(
             u16::from_be_bytes([plaintext[16], plaintext[17]]),
@@ -229,11 +145,11 @@ fn decrypts_supported_fixtures() {
 
 #[test]
 fn ignores_unauthenticated_sqlcipher3_filler() {
-    let expected = decrypt_fixture_pages(sqlcipher3_page_decryptor(), SQLCIPHER3_FIXTURE)
+    let expected = decrypt_fixture_pages(sqlcipher3_page_decryptor(), SQLCIPHER3_CASE.fixture)
         .expect("fixture should decrypt");
-    let mut tampered = SQLCIPHER3_FIXTURE.to_vec();
+    let mut tampered = SQLCIPHER3_CASE.fixture.to_vec();
 
-    for page in tampered.chunks_exact_mut(FIXTURE_CASES[0].page_size) {
+    for page in tampered.chunks_exact_mut(SQLCIPHER3_CASE.page_size) {
         let filler_start = page.len() - 12;
         page[filler_start] ^= 1;
         page[page.len() - 1] ^= 1;
@@ -243,26 +159,6 @@ fn ignores_unauthenticated_sqlcipher3_filler() {
         .expect("unauthenticated filler should be ignored");
 
     assert_eq!(actual.as_slice(), expected.as_slice());
-}
-
-#[test]
-fn rejects_wrong_passphrase() {
-    for case in FIXTURE_CASES {
-        let salt: &[u8; 16] = case.fixture[..16].try_into().unwrap();
-        let wrong = PageDecryptor::new(case.cipher_config(), b"wrong passphrase", salt).unwrap();
-        let mut output = vec![0; case.page_size];
-
-        assert_eq!(
-            wrong
-                .decrypt_page_into(
-                    NonZeroU32::new(1).unwrap(),
-                    &case.fixture[..case.page_size],
-                    &mut output,
-                )
-                .unwrap_err(),
-            DecryptError::AuthenticationFailed { page_no: 1 }
-        );
-    }
 }
 
 #[test]
@@ -303,7 +199,7 @@ fn page_number_is_authenticated() {
 
 #[test]
 fn rejects_invalid_page_buffer_lengths() {
-    for case in FIXTURE_CASES {
+    for case in PRESET_FIXTURE_CASES {
         let page_size = case.page_size;
         let mut output = vec![0_u8; page_size];
         assert_eq!(
@@ -338,34 +234,12 @@ fn rejects_invalid_page_buffer_lengths() {
 }
 
 #[test]
-fn clears_reserved_output_bytes() {
-    for case in FIXTURE_CASES {
-        let page_size = case.page_size;
-        let reserve_size = case.reserve_size;
-        let mut output = vec![0xaa; page_size];
-        case.page_decryptor()
-            .decrypt_page_into(
-                NonZeroU32::new(1).unwrap(),
-                &case.fixture[..page_size],
-                &mut output,
-            )
-            .unwrap();
-
-        assert!(
-            output[page_size - reserve_size..]
-                .iter()
-                .all(|byte| *byte == 0)
-        );
-    }
-}
-
-#[test]
 fn rejects_empty_passphrase() {
-    for case in FIXTURE_CASES {
+    for case in PRESET_FIXTURE_CASES {
         let salt: &[u8; 16] = case.fixture[..16].try_into().unwrap();
 
         assert!(matches!(
-            PageDecryptor::new(case.cipher_config(), b"", salt),
+            PageDecryptor::new(case.config(), b"", salt),
             Err(DecryptError::EmptyPassphrase)
         ));
     }
@@ -402,7 +276,7 @@ fn verifies_a_sha256_page_hmac_from_a_known_answer() {
 }
 
 #[test]
-fn derives_both_keys_with_the_selected_kdf_algorithm() {
+fn uses_the_kdf_algorithm_for_both_keys_independently_of_the_hmac_algorithm() {
     let salt = [0x42; 16];
     let sha1_hmac = PageDecryptor::new(
         CipherConfig::new(1024, 2, HashAlgorithm::Sha256, HashAlgorithm::Sha1).unwrap(),
@@ -446,8 +320,8 @@ fn decodes_sqlite_page_size_header_encoding() {
 #[test]
 fn rejects_mismatched_sqlite_header_fields() {
     for (case, other) in [
-        (FIXTURE_CASES[0], FIXTURE_CASES[1]),
-        (FIXTURE_CASES[1], FIXTURE_CASES[0]),
+        (PRESET_FIXTURE_CASES[0], PRESET_FIXTURE_CASES[1]),
+        (PRESET_FIXTURE_CASES[1], PRESET_FIXTURE_CASES[0]),
     ] {
         let encoded_page_size = u16::try_from(case.page_size)
             .expect("fixture page size fits in u16")

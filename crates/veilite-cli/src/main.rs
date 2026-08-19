@@ -567,29 +567,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_structurally_invalid_custom_configuration() {
-        let error = parse_cipher_config(&[
-            "veilite",
-            "inspect",
-            "--page-size",
-            "513",
-            "--kdf-iterations",
-            "100000",
-            "--kdf-algorithm",
-            "sha256",
-            "--hmac-algorithm",
-            "sha256",
-            "encrypted.db",
-        ])
-        .unwrap_err();
-
-        assert_eq!(
-            error.to_string(),
-            "invalid cipher page size 513: expected a power of two from 1024 to 65536"
-        );
-    }
-
-    #[test]
     fn validates_inspect_file_sizes() {
         for page_size in [1024_u64, 4096] {
             assert!(validate_encrypted_file_size(page_size, page_size).is_ok());

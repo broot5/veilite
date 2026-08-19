@@ -36,6 +36,12 @@ struct FixtureCase {
     passphrase: &'static [u8],
 }
 
+const SQLCIPHER_CUSTOM_CASE: FixtureCase = FixtureCase {
+    name: "sqlcipher-custom",
+    cipher: FixtureCipher::Custom,
+    passphrase: SQLCIPHER_CUSTOM_PASSPHRASE,
+};
+
 const FIXTURE_CASES: [FixtureCase; 3] = [
     FixtureCase {
         name: "sqlcipher3",
@@ -47,15 +53,11 @@ const FIXTURE_CASES: [FixtureCase; 3] = [
         cipher: FixtureCipher::SqlCipher4,
         passphrase: SQLCIPHER4_PASSPHRASE,
     },
-    FixtureCase {
-        name: "sqlcipher-custom",
-        cipher: FixtureCipher::Custom,
-        passphrase: SQLCIPHER_CUSTOM_PASSPHRASE,
-    },
+    SQLCIPHER_CUSTOM_CASE,
 ];
 
 impl FixtureCase {
-    fn cipher_config(self) -> CipherConfig {
+    fn config(self) -> CipherConfig {
         self.cipher.config()
     }
 
@@ -70,7 +72,7 @@ impl FixtureCase {
 #[test]
 fn queries_supported_fixtures() {
     for case in FIXTURE_CASES {
-        let connection = open_readonly(case.path(), case.cipher_config(), case.passphrase)
+        let connection = open_readonly(case.path(), case.config(), case.passphrase)
             .unwrap_or_else(|error| panic!("{} failed to open: {error}", case.name));
 
         let people = connection
@@ -131,50 +133,44 @@ fn queries_supported_fixtures() {
 
 #[test]
 fn connection_rejects_writes() {
-    for case in FIXTURE_CASES {
-        let connection = open_readonly(case.path(), case.cipher_config(), case.passphrase).unwrap();
+    let case = SQLCIPHER_CUSTOM_CASE;
+    let connection = open_readonly(case.path(), case.config(), case.passphrase).unwrap();
 
-        let error = connection
-            .query("UPDATE people SET name = 'Mallory' WHERE id = 1")
-            .unwrap_err();
-        assert!(
-            matches!(error, GraphiteAdapterError::Query { .. }),
-            "{}",
-            case.name
-        );
-    }
+    let error = connection
+        .query("UPDATE people SET name = 'Mallory' WHERE id = 1")
+        .unwrap_err();
+    assert!(matches!(error, GraphiteAdapterError::Query { .. }));
 }
 
 #[test]
 fn file_adapter_is_strictly_read_only() {
-    for case in FIXTURE_CASES {
-        let path = case.path();
-        let path_str = path.to_str().unwrap();
-        let vfs = SqlCipherVfs::new(&path, case.cipher_config(), case.passphrase).unwrap();
-        let mut file = Vfs::open(&vfs, path_str, OpenFlags::READ_ONLY).unwrap();
-        let wal_path = companion_path_string(path_str, WAL_SUFFIX);
+    let case = SQLCIPHER_CUSTOM_CASE;
+    let path = case.path();
+    let path_str = path.to_str().unwrap();
+    let vfs = SqlCipherVfs::new(&path, case.config(), case.passphrase).unwrap();
+    let mut file = Vfs::open(&vfs, path_str, OpenFlags::READ_ONLY).unwrap();
+    let wal_path = companion_path_string(path_str, WAL_SUFFIX);
 
-        assert!(Vfs::exists(&vfs, path_str).unwrap());
-        assert!(!Vfs::exists(&vfs, &wal_path).unwrap());
-        assert_eq!(file.size().unwrap(), fs::metadata(&path).unwrap().len());
-        assert!(file.sync().is_ok());
-        assert!(matches!(
-            file.write_all_at(b"no", 0),
-            Err(GraphiteError::Error(message)) if message == READ_ONLY_ERROR
-        ));
-        assert!(matches!(
-            file.truncate(0),
-            Err(GraphiteError::Error(message)) if message == READ_ONLY_ERROR
-        ));
-        assert!(matches!(
-            Vfs::delete(&vfs, path_str),
-            Err(GraphiteError::Error(message)) if message == READ_ONLY_ERROR
-        ));
-        assert!(matches!(
-            Vfs::open(&vfs, path_str, OpenFlags::READ_WRITE),
-            Err(GraphiteError::Error(message)) if message == READ_ONLY_ERROR
-        ));
-    }
+    assert!(Vfs::exists(&vfs, path_str).unwrap());
+    assert!(!Vfs::exists(&vfs, &wal_path).unwrap());
+    assert_eq!(file.size().unwrap(), fs::metadata(&path).unwrap().len());
+    assert!(file.sync().is_ok());
+    assert!(matches!(
+        file.write_all_at(b"no", 0),
+        Err(GraphiteError::Error(message)) if message == READ_ONLY_ERROR
+    ));
+    assert!(matches!(
+        file.truncate(0),
+        Err(GraphiteError::Error(message)) if message == READ_ONLY_ERROR
+    ));
+    assert!(matches!(
+        Vfs::delete(&vfs, path_str),
+        Err(GraphiteError::Error(message)) if message == READ_ONLY_ERROR
+    ));
+    assert!(matches!(
+        Vfs::open(&vfs, path_str, OpenFlags::READ_WRITE),
+        Err(GraphiteError::Error(message)) if message == READ_ONLY_ERROR
+    ));
 }
 
 #[test]

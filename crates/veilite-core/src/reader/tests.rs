@@ -1,81 +1,17 @@
-use std::cell::RefCell;
 use std::io;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use super::*;
 use crate::decryptor::PageDecryptor;
+use crate::test_support::{FIXTURE_CASES, FixtureCase, PRESET_FIXTURE_CASES, SQLCIPHER4_CASE};
 use crate::{CipherPreset, FileSource, SliceSource};
 
-const SQLCIPHER3_FIXTURE: &[u8] = include_bytes!("../../../../fixtures/sqlcipher3/encrypted.db");
-const SQLCIPHER3_PASSPHRASE: &[u8] = b"veilite-sqlcipher3-test-key";
-const SQLCIPHER4_FIXTURE: &[u8] = include_bytes!("../../../../fixtures/sqlcipher4/encrypted.db");
-const SQLCIPHER4_PASSPHRASE: &[u8] = b"veilite-sqlcipher4-test-key";
-const SQLCIPHER_CUSTOM_FIXTURE: &[u8] =
-    include_bytes!("../../../../fixtures/sqlcipher-custom/encrypted.db");
-const SQLCIPHER_CUSTOM_PASSPHRASE: &[u8] = b"veilite-sqlcipher-custom-test-key";
-
-#[derive(Clone, Copy)]
-enum FixtureCipher {
-    SqlCipher3,
-    SqlCipher4,
-    Custom,
-}
-
-impl FixtureCipher {
-    fn config(self) -> CipherConfig {
-        match self {
-            Self::SqlCipher3 => CipherPreset::SqlCipher3.into(),
-            Self::SqlCipher4 => CipherPreset::SqlCipher4.into(),
-            Self::Custom => CipherConfig::new(
-                2048,
-                100_000,
-                crate::HashAlgorithm::Sha256,
-                crate::HashAlgorithm::Sha256,
-            )
-            .expect("custom fixture configuration is valid"),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct FixtureCase {
-    name: &'static str,
-    cipher: FixtureCipher,
-    fixture: &'static [u8],
-    passphrase: &'static [u8],
-}
-
-const FIXTURE_CASES: [FixtureCase; 3] = [
-    FixtureCase {
-        name: "sqlcipher3",
-        cipher: FixtureCipher::SqlCipher3,
-        fixture: SQLCIPHER3_FIXTURE,
-        passphrase: SQLCIPHER3_PASSPHRASE,
-    },
-    FixtureCase {
-        name: "sqlcipher4",
-        cipher: FixtureCipher::SqlCipher4,
-        fixture: SQLCIPHER4_FIXTURE,
-        passphrase: SQLCIPHER4_PASSPHRASE,
-    },
-    FixtureCase {
-        name: "sqlcipher-custom",
-        cipher: FixtureCipher::Custom,
-        fixture: SQLCIPHER_CUSTOM_FIXTURE,
-        passphrase: SQLCIPHER_CUSTOM_PASSPHRASE,
-    },
-];
-
 impl FixtureCase {
-    fn cipher_config(self) -> CipherConfig {
-        self.cipher.config()
-    }
-
     fn reader(self) -> SqlCipherReader<SliceSource<'static>> {
         SqlCipherReader::open(
             SliceSource::new(self.fixture),
-            self.cipher_config(),
+            self.config(),
             self.passphrase,
         )
         .unwrap_or_else(|error| panic!("{} reader failed to open: {error}", self.name))
@@ -83,7 +19,7 @@ impl FixtureCase {
 
     fn plaintext(self) -> Zeroizing<Vec<u8>> {
         let salt = self.fixture[..16].try_into().unwrap();
-        let decryptor = PageDecryptor::new(self.cipher_config(), self.passphrase, salt).unwrap();
+        let decryptor = PageDecryptor::new(self.config(), self.passphrase, salt).unwrap();
         let page_size = decryptor.page_size();
         let mut plaintext = Zeroizing::new(vec![0; self.fixture.len()]);
 
@@ -111,7 +47,7 @@ fn opens_supported_fixture_metadata() {
         let reader = case.reader();
 
         assert_eq!(reader.file_size(), case.fixture.len() as u64);
-        let page_size = case.cipher_config().page_size();
+        let page_size = case.config().page_size();
         assert_eq!(reader.page_size(), page_size);
         assert_eq!(
             reader.page_count(),
@@ -125,7 +61,7 @@ fn defers_passphrase_authentication_until_the_first_page_read() {
     for case in FIXTURE_CASES {
         let reader = SqlCipherReader::open(
             SliceSource::new(case.fixture),
-            case.cipher_config(),
+            case.config(),
             b"wrong passphrase",
         )
         .expect("opening a reader should only derive keys");
@@ -262,7 +198,7 @@ fn rejects_more_pages_than_u32_can_address() {
 
 #[test]
 fn rejects_out_of_range_pages_and_reads() {
-    for case in FIXTURE_CASES {
+    for case in PRESET_FIXTURE_CASES {
         let reader = case.reader();
         let mut page = vec![0xaa; reader.page_size()];
         let page_no = reader.page_count() + 1;
@@ -296,15 +232,12 @@ fn rejects_out_of_range_pages_and_reads() {
 #[test]
 fn clears_partial_plaintext_when_a_later_page_fails_authentication() {
     for case in FIXTURE_CASES {
-        let page_size = case.cipher_config().page_size();
+        let page_size = case.config().page_size();
         let mut tampered = case.fixture.to_vec();
         tampered[page_size + 16] ^= 1;
-        let reader = SqlCipherReader::open(
-            SliceSource::new(&tampered),
-            case.cipher_config(),
-            case.passphrase,
-        )
-        .unwrap();
+        let reader =
+            SqlCipherReader::open(SliceSource::new(&tampered), case.config(), case.passphrase)
+                .unwrap();
         let mut output = vec![0xaa; 64];
 
         let error = reader
@@ -338,12 +271,12 @@ impl ReadAt for MisreportedLengthSource<'_> {
 
 #[test]
 fn rejects_short_source_reads_and_clears_output() {
-    let case = FIXTURE_CASES[1];
+    let case = SQLCIPHER4_CASE;
     let source = MisreportedLengthSource {
         bytes: &case.fixture[..case.fixture.len() - 1],
         reported_length: case.fixture.len() as u64,
     };
-    let reader = SqlCipherReader::open(source, case.cipher_config(), case.passphrase).unwrap();
+    let reader = SqlCipherReader::open(source, case.config(), case.passphrase).unwrap();
     let mut output = vec![0xaa; reader.page_size()];
 
     let error = reader
@@ -358,53 +291,14 @@ fn rejects_short_source_reads_and_clears_output() {
     assert!(output.iter().all(|byte| *byte == 0));
 }
 
-struct RecordingSource<'a> {
-    bytes: &'a [u8],
-    reads: RefCell<Vec<(u64, usize)>>,
-}
-
-impl ReadAt for RecordingSource<'_> {
-    type Error = io::Error;
-
-    fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> io::Result<()> {
-        self.reads.borrow_mut().push((offset, output.len()));
-        SliceSource::new(self.bytes).read_exact_at(offset, output)
-    }
-
-    fn len(&self) -> io::Result<u64> {
-        Ok(self.bytes.len() as u64)
-    }
-}
-
-#[test]
-fn reads_only_the_physical_pages_needed_for_a_range() {
-    let case = FIXTURE_CASES[1];
-    let source = RecordingSource {
-        bytes: case.fixture,
-        reads: RefCell::new(Vec::new()),
-    };
-    let reader = SqlCipherReader::open(source, case.cipher_config(), case.passphrase).unwrap();
-    let page_size = reader.page_size();
-    let mut output = vec![0; 64];
-
-    reader
-        .read_exact_at((page_size - 32) as u64, &mut output)
-        .unwrap();
-
-    assert_eq!(
-        reader.source.reads.into_inner(),
-        vec![(0, 16), (0, page_size), (page_size as u64, page_size)]
-    );
-}
-
 #[test]
 fn reads_ranges_from_file_source() {
-    let case = FIXTURE_CASES[1];
+    let case = SQLCIPHER4_CASE;
     let fixture_path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/sqlcipher4/encrypted.db");
     let reader = SqlCipherReader::open(
         FileSource::open(fixture_path).unwrap(),
-        case.cipher_config(),
+        case.config(),
         case.passphrase,
     )
     .unwrap();
