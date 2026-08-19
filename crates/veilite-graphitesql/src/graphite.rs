@@ -70,7 +70,7 @@ struct SqlCipherFile {
 
 impl SqlCipherFile {
     #[must_use]
-    fn new(reader: SqlCipherReader<FileSource>) -> Self {
+    const fn new(reader: SqlCipherReader<FileSource>) -> Self {
         Self { reader }
     }
 }

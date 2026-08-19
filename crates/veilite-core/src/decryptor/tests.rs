@@ -433,6 +433,17 @@ fn derives_both_keys_with_the_selected_kdf_algorithm() {
 }
 
 #[test]
+fn decodes_sqlite_page_size_header_encoding() {
+    for (encoded, expected) in [
+        ([0x00, 0x01], 65_536),
+        ([0x04, 0x00], 1024),
+        ([0x10, 0x00], 4096),
+    ] {
+        assert_eq!(decode_sqlite_page_size(encoded), expected);
+    }
+}
+
+#[test]
 fn rejects_mismatched_sqlite_header_fields() {
     for (case, other) in [
         (FIXTURE_CASES[0], FIXTURE_CASES[1]),

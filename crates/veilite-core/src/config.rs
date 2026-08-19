@@ -36,6 +36,7 @@ pub enum HashAlgorithm {
 }
 
 impl HashAlgorithm {
+    #[must_use]
     pub(crate) const fn output_len(self) -> usize {
         match self {
             Self::Sha1 => 20,
@@ -126,6 +127,7 @@ impl CipherConfig {
         self.reserve_size
     }
 
+    #[must_use]
     pub(crate) const fn usable_end(self) -> usize {
         self.usable_end
     }

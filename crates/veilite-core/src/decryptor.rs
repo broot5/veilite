@@ -150,12 +150,7 @@ impl PageDecryptor {
         if page_number == 1 {
             output[..SQLITE_HEADER_MAGIC.len()].copy_from_slice(SQLITE_HEADER_MAGIC);
 
-            let encoded_page_size = u16::from_be_bytes([output[16], output[17]]);
-            let sqlite_page_size = if encoded_page_size == 1 {
-                65_536
-            } else {
-                usize::from(encoded_page_size)
-            };
+            let sqlite_page_size = decode_sqlite_page_size([output[16], output[17]]);
             if sqlite_page_size != self.config.page_size() {
                 output.zeroize();
                 return Err(DecryptError::InvalidSqlitePageSize {
@@ -236,6 +231,16 @@ impl PageDecryptor {
                     })
             }
         }
+    }
+}
+
+#[must_use]
+fn decode_sqlite_page_size(encoded: [u8; 2]) -> usize {
+    let page_size = u16::from_be_bytes(encoded);
+    if page_size == 1 {
+        65_536
+    } else {
+        usize::from(page_size)
     }
 }
 
