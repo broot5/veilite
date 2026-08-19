@@ -21,20 +21,13 @@ impl FixtureCase {
         let salt = self.fixture[..16].try_into().unwrap();
         let decryptor = PageDecryptor::new(self.config(), self.passphrase, salt).unwrap();
         let page_size = decryptor.page_size();
-        let mut plaintext = Zeroizing::new(vec![0; self.fixture.len()]);
+        let mut plaintext = Zeroizing::new(self.fixture.to_vec());
 
-        for (index, encrypted_page) in self.fixture.chunks_exact(page_size).enumerate() {
+        for (index, page) in plaintext.chunks_exact_mut(page_size).enumerate() {
             let page_no =
                 NonZeroU32::new(u32::try_from(index + 1).expect("fixture page number fits"))
                     .expect("fixture page numbers start at one");
-            let start = index * page_size;
-            decryptor
-                .decrypt_page_into(
-                    page_no,
-                    encrypted_page,
-                    &mut plaintext[start..start + page_size],
-                )
-                .unwrap();
+            decryptor.decrypt_page_in_place(page_no, page).unwrap();
         }
 
         plaintext
@@ -94,6 +87,31 @@ fn reads_single_pages() {
             let start = (page_no as usize - 1) * page_size;
 
             assert_eq!(output, expected[start..start + page_size], "{}", case.name);
+        }
+    }
+}
+
+#[test]
+fn rejects_invalid_output_page_lengths_and_clears_output() {
+    for case in PRESET_FIXTURE_CASES {
+        let reader = case.reader();
+        let page_size = reader.page_size();
+
+        for actual in [page_size - 1, page_size + 1] {
+            let mut output = vec![0xaa; actual];
+
+            let error = reader
+                .read_page_into(NonZeroU32::new(1).unwrap(), &mut output)
+                .unwrap_err();
+
+            assert!(matches!(
+                error,
+                ReaderError::InvalidOutputPageLength {
+                    expected: error_expected,
+                    actual: error_actual,
+                } if error_expected == page_size && error_actual == actual
+            ));
+            assert!(output.iter().all(|byte| *byte == 0));
         }
     }
 }

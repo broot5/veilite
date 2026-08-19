@@ -45,17 +45,12 @@ fn decrypt_fixture_pages(
     encrypted: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, DecryptError> {
     let page_size = decryptor.page_size();
-    let mut plaintext = Zeroizing::new(vec![0; encrypted.len()]);
+    let mut plaintext = Zeroizing::new(encrypted.to_vec());
 
-    for (index, encrypted_page) in encrypted.chunks_exact(page_size).enumerate() {
+    for (index, page) in plaintext.chunks_exact_mut(page_size).enumerate() {
         let page_no = NonZeroU32::new(u32::try_from(index + 1).expect("fixture page number fits"))
             .expect("fixture page numbers start at one");
-        let start = index * page_size;
-        decryptor.decrypt_page_into(
-            page_no,
-            encrypted_page,
-            &mut plaintext[start..start + page_size],
-        )?;
+        decryptor.decrypt_page_in_place(page_no, page)?;
     }
 
     Ok(plaintext)
@@ -170,14 +165,28 @@ fn rejects_tampering_in_ciphertext_iv_and_hmac() {
         for index in [16, iv_start, hmac_start] {
             let mut tampered = case.fixture[..case.page_size].to_vec();
             tampered[index] ^= 1;
-            let mut output = vec![0; case.page_size];
             assert_eq!(
                 case.page_decryptor()
-                    .decrypt_page_into(NonZeroU32::new(1).unwrap(), &tampered, &mut output)
+                    .decrypt_page_in_place(NonZeroU32::new(1).unwrap(), &mut tampered)
                     .unwrap_err(),
                 DecryptError::AuthenticationFailed { page_no: 1 }
             );
+            assert!(tampered.iter().all(|byte| *byte == 0));
         }
+    }
+}
+
+#[test]
+fn rejects_all_zero_physical_pages() {
+    for case in FIXTURE_CASES {
+        let mut page = vec![0; case.page_size];
+
+        let error = case
+            .page_decryptor()
+            .decrypt_page_in_place(NonZeroU32::new(1).unwrap(), &mut page)
+            .unwrap_err();
+
+        assert_eq!(error, DecryptError::AuthenticationFailed { page_no: 1 });
     }
 }
 
@@ -185,51 +194,15 @@ fn rejects_tampering_in_ciphertext_iv_and_hmac() {
 fn page_number_is_authenticated() {
     for case in FIXTURE_CASES {
         let page_size = case.page_size;
-        let second_page = &case.fixture[page_size..2 * page_size];
-        let mut output = vec![0_u8; page_size];
+        let mut second_page = case.fixture[page_size..2 * page_size].to_vec();
 
         assert_eq!(
             case.page_decryptor()
-                .decrypt_page_into(NonZeroU32::new(3).unwrap(), second_page, &mut output)
+                .decrypt_page_in_place(NonZeroU32::new(3).unwrap(), &mut second_page)
                 .unwrap_err(),
             DecryptError::AuthenticationFailed { page_no: 3 }
         );
-    }
-}
-
-#[test]
-fn rejects_invalid_page_buffer_lengths() {
-    for case in PRESET_FIXTURE_CASES {
-        let page_size = case.page_size;
-        let mut output = vec![0_u8; page_size];
-        assert_eq!(
-            case.page_decryptor()
-                .decrypt_page_into(
-                    NonZeroU32::new(1).unwrap(),
-                    &case.fixture[..page_size - 1],
-                    &mut output,
-                )
-                .unwrap_err(),
-            DecryptError::InvalidEncryptedPageLength {
-                expected: page_size,
-                actual: page_size - 1,
-            }
-        );
-
-        let mut short_output = vec![0_u8; page_size - 1];
-        assert_eq!(
-            case.page_decryptor()
-                .decrypt_page_into(
-                    NonZeroU32::new(1).unwrap(),
-                    &case.fixture[..page_size],
-                    &mut short_output,
-                )
-                .unwrap_err(),
-            DecryptError::InvalidOutputPageLength {
-                expected: page_size,
-                actual: page_size - 1,
-            }
-        );
+        assert!(second_page.iter().all(|byte| *byte == 0));
     }
 }
 
@@ -356,15 +329,14 @@ fn rejects_mismatched_sqlite_header_fields() {
             ),
         ];
 
-        for (page, expected_error) in cases {
-            let mut output = vec![0xaa; case.page_size];
+        for (mut page, expected_error) in cases {
             let error = case
                 .page_decryptor()
-                .decrypt_page_into(NonZeroU32::new(1).unwrap(), &page, &mut output)
+                .decrypt_page_in_place(NonZeroU32::new(1).unwrap(), &mut page)
                 .unwrap_err();
 
             assert_eq!(error, expected_error);
-            assert!(output.iter().all(|byte| *byte == 0));
+            assert!(page.iter().all(|byte| *byte == 0));
         }
     }
 }

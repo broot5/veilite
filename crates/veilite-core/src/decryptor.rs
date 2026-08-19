@@ -28,10 +28,6 @@ pub struct PageDecryptor {
 pub enum DecryptError {
     #[error("the passphrase is empty")]
     EmptyPassphrase,
-    #[error("invalid encrypted page length: expected {expected} bytes, got {actual}")]
-    InvalidEncryptedPageLength { expected: usize, actual: usize },
-    #[error("invalid output page length: expected {expected} bytes, got {actual}")]
-    InvalidOutputPageLength { expected: usize, actual: usize },
     #[error(
         "invalid SQLite page size in the decrypted header: expected {expected} bytes, got {actual}"
     )]
@@ -42,8 +38,6 @@ pub enum DecryptError {
     InvalidSqliteReserveSize { expected: usize, actual: usize },
     #[error("authentication failed for page {page_no}: wrong passphrase or corrupted data")]
     AuthenticationFailed { page_no: u32 },
-    #[error("ciphertext on page {page_no} is not AES block-aligned")]
-    InvalidCiphertextLength { page_no: u32 },
 }
 
 impl PageDecryptor {
@@ -88,80 +82,65 @@ impl PageDecryptor {
         self.config.page_size()
     }
 
-    pub fn decrypt_page_into(
+    pub fn decrypt_page_in_place(
         &self,
         page_no: NonZeroU32,
-        encrypted_page: &[u8],
-        output: &mut [u8],
+        page: &mut [u8],
     ) -> Result<(), DecryptError> {
-        let expected = self.config.page_size();
-        if encrypted_page.len() != expected {
-            return Err(DecryptError::InvalidEncryptedPageLength {
-                expected,
-                actual: encrypted_page.len(),
-            });
-        }
-        if output.len() != expected {
-            return Err(DecryptError::InvalidOutputPageLength {
-                expected,
-                actual: output.len(),
-            });
-        }
+        debug_assert_eq!(
+            page.len(),
+            self.config.page_size(),
+            "reader must provide exactly one encrypted page"
+        );
 
-        output.fill(0);
+        let result = self.decrypt_page_in_place_inner(page_no, page);
+        if result.is_err() {
+            page.zeroize();
+        }
+        result
+    }
 
+    fn decrypt_page_in_place_inner(
+        &self,
+        page_no: NonZeroU32,
+        page: &mut [u8],
+    ) -> Result<(), DecryptError> {
         let page_number = page_no.get();
         let ciphertext_offset = if page_number == 1 { 16 } else { 0 };
         let ciphertext_len = self.config.usable_end() - ciphertext_offset;
-        if !ciphertext_len.is_multiple_of(AES_BLOCK_SIZE) {
-            return Err(DecryptError::InvalidCiphertextLength {
-                page_no: page_number,
-            });
-        }
-
         let ciphertext_end = ciphertext_offset + ciphertext_len;
         let iv_end = ciphertext_end + AES_BLOCK_SIZE;
         let hmac_end = iv_end + self.config.hmac_algorithm().output_len();
 
-        let ciphertext = &encrypted_page[ciphertext_offset..ciphertext_end];
-        let iv: &[u8; AES_BLOCK_SIZE] = encrypted_page[ciphertext_end..iv_end]
+        let iv: [u8; AES_BLOCK_SIZE] = page[ciphertext_end..iv_end]
             .try_into()
             .expect("validated page layout has a 16-byte IV");
-        let stored_hmac = &encrypted_page[iv_end..hmac_end];
-
-        self.verify_page_hmac(ciphertext, iv, page_number, stored_hmac)?;
+        self.verify_page_hmac(
+            &page[ciphertext_offset..ciphertext_end],
+            &iv,
+            page_number,
+            &page[iv_end..hmac_end],
+        )?;
 
         let cipher =
-            cbc::Decryptor::<aes::Aes256>::new((&self.keys.encryption_key).into(), iv.into());
-
-        if cipher
-            .decrypt_padded_b2b::<NoPadding>(
-                ciphertext,
-                &mut output[ciphertext_offset..ciphertext_end],
-            )
-            .is_err()
-        {
-            output.zeroize();
-            return Err(DecryptError::InvalidCiphertextLength {
-                page_no: page_number,
-            });
-        }
+            cbc::Decryptor::<aes::Aes256>::new((&self.keys.encryption_key).into(), (&iv).into());
+        cipher
+            .decrypt_padded::<NoPadding>(&mut page[ciphertext_offset..ciphertext_end])
+            .expect("validated page layout is AES block-aligned");
 
         if page_number == 1 {
-            output[..SQLITE_HEADER_MAGIC.len()].copy_from_slice(SQLITE_HEADER_MAGIC);
+            page[..SQLITE_HEADER_MAGIC.len()].copy_from_slice(SQLITE_HEADER_MAGIC);
 
-            let sqlite_page_size = decode_sqlite_page_size([output[16], output[17]]);
+            let sqlite_page_size = decode_sqlite_page_size([page[16], page[17]]);
             if sqlite_page_size != self.config.page_size() {
-                output.zeroize();
                 return Err(DecryptError::InvalidSqlitePageSize {
                     expected: self.config.page_size(),
                     actual: sqlite_page_size,
                 });
             }
 
-            let sqlite_reserve_size = usize::from(output[20]);
+            let sqlite_reserve_size = usize::from(page[20]);
             if sqlite_reserve_size != self.config.reserve_size() {
-                output.zeroize();
                 return Err(DecryptError::InvalidSqliteReserveSize {
                     expected: self.config.reserve_size(),
                     actual: sqlite_reserve_size,
@@ -169,6 +148,7 @@ impl PageDecryptor {
             }
         }
 
+        page[self.config.usable_end()..].zeroize();
         Ok(())
     }
 

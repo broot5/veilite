@@ -14,6 +14,8 @@ pub enum ReaderError<E> {
     Source(#[source] E),
     #[error("database decryption failed: {0}")]
     Decrypt(#[from] DecryptError),
+    #[error("invalid output page length: expected {expected} bytes, got {actual}")]
+    InvalidOutputPageLength { expected: usize, actual: usize },
     #[error("the encrypted database is empty")]
     EmptyFile,
     #[error(
@@ -110,11 +112,12 @@ impl<R: ReadAt> SqlCipherReader<R> {
     ) -> Result<(), ReaderError<R::Error>> {
         let page_size = self.page_size();
         if output.len() != page_size {
-            return Err(DecryptError::InvalidOutputPageLength {
+            let actual = output.len();
+            output.zeroize();
+            return Err(ReaderError::InvalidOutputPageLength {
                 expected: page_size,
-                actual: output.len(),
-            }
-            .into());
+                actual,
+            });
         }
         output.fill(0);
 
@@ -134,17 +137,12 @@ impl<R: ReadAt> SqlCipherReader<R> {
                     offset: page_index,
                     length: page_size,
                 })?;
-        let mut encrypted_page = vec![0; page_size];
-        if let Err(error) = self
-            .source
-            .read_exact_at(encrypted_offset, &mut encrypted_page)
-        {
+        if let Err(error) = self.source.read_exact_at(encrypted_offset, output) {
             output.zeroize();
             return Err(ReaderError::Source(error));
         }
 
-        self.decryptor
-            .decrypt_page_into(page_no, &encrypted_page, output)?;
+        self.decryptor.decrypt_page_in_place(page_no, output)?;
 
         Ok(())
     }
