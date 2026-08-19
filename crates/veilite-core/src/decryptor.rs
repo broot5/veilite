@@ -19,7 +19,7 @@ struct KeyMaterial {
     hmac_key: [u8; 32],
 }
 
-pub(crate) struct PageDecryptor {
+pub struct PageDecryptor {
     config: CipherConfig,
     keys: KeyMaterial,
 }
@@ -44,12 +44,10 @@ pub enum DecryptError {
     AuthenticationFailed { page_no: u32 },
     #[error("ciphertext on page {page_no} is not AES block-aligned")]
     InvalidCiphertextLength { page_no: u32 },
-    #[error("failed to initialize a cryptographic primitive")]
-    CryptoInitializationFailed,
 }
 
 impl PageDecryptor {
-    pub(crate) fn new(
+    pub fn new(
         config: CipherConfig,
         passphrase: &[u8],
         salt: &[u8; 16],
@@ -86,11 +84,11 @@ impl PageDecryptor {
     }
 
     #[must_use]
-    pub(crate) const fn page_size(&self) -> usize {
+    pub const fn page_size(&self) -> usize {
         self.config.page_size()
     }
 
-    pub(crate) fn decrypt_page_into(
+    pub fn decrypt_page_into(
         &self,
         page_no: NonZeroU32,
         encrypted_page: &[u8],
@@ -126,13 +124,15 @@ impl PageDecryptor {
         let hmac_end = iv_end + self.config.hmac_algorithm().output_len();
 
         let ciphertext = &encrypted_page[ciphertext_offset..ciphertext_end];
-        let iv = &encrypted_page[ciphertext_end..iv_end];
+        let iv: &[u8; AES_BLOCK_SIZE] = encrypted_page[ciphertext_end..iv_end]
+            .try_into()
+            .expect("validated page layout has a 16-byte IV");
         let stored_hmac = &encrypted_page[iv_end..hmac_end];
 
         self.verify_page_hmac(ciphertext, iv, page_number, stored_hmac)?;
 
-        let cipher = cbc::Decryptor::<aes::Aes256>::new_from_slices(&self.keys.encryption_key, iv)
-            .map_err(|_| DecryptError::CryptoInitializationFailed)?;
+        let cipher =
+            cbc::Decryptor::<aes::Aes256>::new((&self.keys.encryption_key).into(), iv.into());
 
         if cipher
             .decrypt_padded_b2b::<NoPadding>(
@@ -196,7 +196,7 @@ impl PageDecryptor {
         match self.config.hmac_algorithm() {
             HashAlgorithm::Sha1 => {
                 let mac = hmac::Hmac::<Sha1>::new_from_slice(&self.keys.hmac_key)
-                    .map_err(|_| DecryptError::CryptoInitializationFailed)?
+                    .expect("HMAC accepts keys of any length")
                     .chain_update(ciphertext)
                     .chain_update(iv)
                     .chain_update(page_number.to_le_bytes());
@@ -208,7 +208,7 @@ impl PageDecryptor {
             }
             HashAlgorithm::Sha256 => {
                 let mac = hmac::Hmac::<Sha256>::new_from_slice(&self.keys.hmac_key)
-                    .map_err(|_| DecryptError::CryptoInitializationFailed)?
+                    .expect("HMAC accepts keys of any length")
                     .chain_update(ciphertext)
                     .chain_update(iv)
                     .chain_update(page_number.to_le_bytes());
@@ -220,7 +220,7 @@ impl PageDecryptor {
             }
             HashAlgorithm::Sha512 => {
                 let mac = hmac::Hmac::<Sha512>::new_from_slice(&self.keys.hmac_key)
-                    .map_err(|_| DecryptError::CryptoInitializationFailed)?
+                    .expect("HMAC accepts keys of any length")
                     .chain_update(ciphertext)
                     .chain_update(iv)
                     .chain_update(page_number.to_le_bytes());

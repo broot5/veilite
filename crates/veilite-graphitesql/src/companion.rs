@@ -47,7 +47,7 @@ fn path_exists(path: &Path) -> Result<bool, CompanionError> {
     }
 }
 
-pub(crate) fn companion_path(path: &Path, suffix: &str) -> PathBuf {
+pub fn companion_path(path: &Path, suffix: &str) -> PathBuf {
     let mut companion = path.as_os_str().to_os_string();
     companion.push(suffix);
     companion.into()

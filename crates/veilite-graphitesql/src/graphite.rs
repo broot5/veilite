@@ -68,13 +68,6 @@ struct SqlCipherFile {
     reader: SqlCipherReader<FileSource>,
 }
 
-impl SqlCipherFile {
-    #[must_use]
-    const fn new(reader: SqlCipherReader<FileSource>) -> Self {
-        Self { reader }
-    }
-}
-
 impl File for SqlCipherFile {
     fn read_exact_at(&self, output: &mut [u8], offset: u64) -> graphitesql::Result<()> {
         self.reader
@@ -127,17 +120,6 @@ impl SqlCipherVfs {
             passphrase: Zeroizing::new(passphrase.to_vec()),
         })
     }
-
-    fn open_readonly(&self) -> Result<ReadOnlyConnection, GraphiteAdapterError> {
-        check_companion_files(&self.main_path)?;
-        let inner =
-            GraphiteConnection::open_readonly_vfs(self, &self.main_path_utf8).map_err(|error| {
-                GraphiteAdapterError::Open {
-                    message: error.to_string(),
-                }
-            })?;
-        Ok(ReadOnlyConnection { inner })
-    }
 }
 
 impl Vfs for SqlCipherVfs {
@@ -166,7 +148,7 @@ impl Vfs for SqlCipherVfs {
         let reader = SqlCipherReader::open(source, self.config, self.passphrase.as_slice())
             .map_err(map_reader_error)?;
 
-        Ok(Box::new(SqlCipherFile::new(reader)))
+        Ok(Box::new(SqlCipherFile { reader }))
     }
 
     fn delete(&self, _path: &str) -> graphitesql::Result<()> {
@@ -187,7 +169,15 @@ pub fn open_readonly(
     config: CipherConfig,
     passphrase: &[u8],
 ) -> Result<ReadOnlyConnection, GraphiteAdapterError> {
-    SqlCipherVfs::new(path, config, passphrase)?.open_readonly()
+    let vfs = SqlCipherVfs::new(path, config, passphrase)?;
+    check_companion_files(&vfs.main_path)?;
+    let inner =
+        GraphiteConnection::open_readonly_vfs(&vfs, &vfs.main_path_utf8).map_err(|error| {
+            GraphiteAdapterError::Open {
+                message: error.to_string(),
+            }
+        })?;
+    Ok(ReadOnlyConnection { inner })
 }
 
 fn convert_query_result(result: GraphiteQueryResult) -> QueryResult {

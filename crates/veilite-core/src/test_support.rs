@@ -9,24 +9,24 @@ const SQLCIPHER_CUSTOM_FIXTURE: &[u8] =
 const SQLCIPHER_CUSTOM_PASSPHRASE: &[u8] = b"veilite-sqlcipher-custom-test-key";
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum FixtureCipher {
+pub enum FixtureCipher {
     SqlCipher3,
     SqlCipher4,
     Custom,
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct FixtureCase {
-    pub(crate) name: &'static str,
-    pub(crate) cipher: FixtureCipher,
-    pub(crate) fixture: &'static [u8],
-    pub(crate) passphrase: &'static [u8],
-    pub(crate) page_size: usize,
-    pub(crate) reserve_size: usize,
+pub struct FixtureCase {
+    pub name: &'static str,
+    pub cipher: FixtureCipher,
+    pub fixture: &'static [u8],
+    pub passphrase: &'static [u8],
+    pub page_size: usize,
+    pub reserve_size: usize,
 }
 
 impl FixtureCase {
-    pub(crate) fn config(self) -> CipherConfig {
+    pub fn config(self) -> CipherConfig {
         match self.cipher {
             FixtureCipher::SqlCipher3 => CipherPreset::SqlCipher3.into(),
             FixtureCipher::SqlCipher4 => CipherPreset::SqlCipher4.into(),
@@ -38,7 +38,7 @@ impl FixtureCase {
     }
 }
 
-pub(crate) const SQLCIPHER3_CASE: FixtureCase = FixtureCase {
+pub const SQLCIPHER3_CASE: FixtureCase = FixtureCase {
     name: "sqlcipher3",
     cipher: FixtureCipher::SqlCipher3,
     fixture: SQLCIPHER3_FIXTURE,
@@ -47,7 +47,7 @@ pub(crate) const SQLCIPHER3_CASE: FixtureCase = FixtureCase {
     reserve_size: 48,
 };
 
-pub(crate) const SQLCIPHER4_CASE: FixtureCase = FixtureCase {
+pub const SQLCIPHER4_CASE: FixtureCase = FixtureCase {
     name: "sqlcipher4",
     cipher: FixtureCipher::SqlCipher4,
     fixture: SQLCIPHER4_FIXTURE,
@@ -56,7 +56,7 @@ pub(crate) const SQLCIPHER4_CASE: FixtureCase = FixtureCase {
     reserve_size: 80,
 };
 
-pub(crate) const SQLCIPHER_CUSTOM_CASE: FixtureCase = FixtureCase {
+pub const SQLCIPHER_CUSTOM_CASE: FixtureCase = FixtureCase {
     name: "sqlcipher-custom",
     cipher: FixtureCipher::Custom,
     fixture: SQLCIPHER_CUSTOM_FIXTURE,
@@ -65,6 +65,6 @@ pub(crate) const SQLCIPHER_CUSTOM_CASE: FixtureCase = FixtureCase {
     reserve_size: 48,
 };
 
-pub(crate) const PRESET_FIXTURE_CASES: [FixtureCase; 2] = [SQLCIPHER3_CASE, SQLCIPHER4_CASE];
-pub(crate) const FIXTURE_CASES: [FixtureCase; 3] =
+pub const PRESET_FIXTURE_CASES: [FixtureCase; 2] = [SQLCIPHER3_CASE, SQLCIPHER4_CASE];
+pub const FIXTURE_CASES: [FixtureCase; 3] =
     [SQLCIPHER3_CASE, SQLCIPHER4_CASE, SQLCIPHER_CUSTOM_CASE];

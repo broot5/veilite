@@ -37,7 +37,7 @@ pub enum HashAlgorithm {
 
 impl HashAlgorithm {
     #[must_use]
-    pub(crate) const fn output_len(self) -> usize {
+    pub(super) const fn output_len(self) -> usize {
         match self {
             Self::Sha1 => 20,
             Self::Sha256 => 32,
@@ -52,8 +52,6 @@ pub struct CipherConfig {
     kdf_iterations: u32,
     kdf_algorithm: HashAlgorithm,
     hmac_algorithm: HashAlgorithm,
-    reserve_size: usize,
-    usable_end: usize,
 }
 
 impl CipherConfig {
@@ -70,26 +68,22 @@ impl CipherConfig {
             return Err(CipherConfigError::InvalidKdfIterations { kdf_iterations });
         }
 
-        let raw_reserve = IV_SIZE + hmac_algorithm.output_len();
-        let reserve_size = raw_reserve.next_multiple_of(AES_BLOCK_SIZE);
-        let Some(usable_end) = page_size.checked_sub(reserve_size) else {
-            return Err(CipherConfigError::InvalidPageLayout {
-                page_size,
-                reserve_size,
-            });
+        let reserve_size = reserve_size_for(hmac_algorithm);
+        let invalid_layout = CipherConfigError::InvalidPageLayout {
+            page_size,
+            reserve_size,
         };
-        let first_page_ciphertext_len = usable_end.checked_sub(DATABASE_SALT_SIZE);
-        if reserve_size >= page_size
-            || u8::try_from(reserve_size).is_err()
-            || usable_end < MIN_SQLITE_USABLE_SIZE
+        let usable_end = page_size.checked_sub(reserve_size).ok_or(invalid_layout)?;
+        if usable_end < MIN_SQLITE_USABLE_SIZE {
+            return Err(invalid_layout);
+        }
+
+        let first_page_ciphertext_len = usable_end - DATABASE_SALT_SIZE;
+        if u8::try_from(reserve_size).is_err()
             || !usable_end.is_multiple_of(AES_BLOCK_SIZE)
-            || !first_page_ciphertext_len
-                .is_some_and(|length| length.is_multiple_of(AES_BLOCK_SIZE))
+            || !first_page_ciphertext_len.is_multiple_of(AES_BLOCK_SIZE)
         {
-            return Err(CipherConfigError::InvalidPageLayout {
-                page_size,
-                reserve_size,
-            });
+            return Err(invalid_layout);
         }
 
         Ok(Self {
@@ -97,8 +91,6 @@ impl CipherConfig {
             kdf_iterations,
             kdf_algorithm,
             hmac_algorithm,
-            reserve_size,
-            usable_end,
         })
     }
 
@@ -124,13 +116,18 @@ impl CipherConfig {
 
     #[must_use]
     pub const fn reserve_size(self) -> usize {
-        self.reserve_size
+        reserve_size_for(self.hmac_algorithm)
     }
 
     #[must_use]
-    pub(crate) const fn usable_end(self) -> usize {
-        self.usable_end
+    pub(super) const fn usable_end(self) -> usize {
+        self.page_size - self.reserve_size()
     }
+}
+
+#[must_use]
+const fn reserve_size_for(hmac_algorithm: HashAlgorithm) -> usize {
+    (IV_SIZE + hmac_algorithm.output_len()).next_multiple_of(AES_BLOCK_SIZE)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
