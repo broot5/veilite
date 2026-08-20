@@ -1,3 +1,4 @@
+use std::error::Error as StdError;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -28,10 +29,16 @@ pub enum GraphiteAdapterError {
     NonUtf8Path { path: PathBuf },
     #[error(transparent)]
     Companion(#[from] CompanionError),
-    #[error("GraphiteSQL failed to open the database: {message}")]
-    Open { message: String },
-    #[error("GraphiteSQL query failed: {message}")]
-    Query { message: String },
+    #[error("GraphiteSQL failed to open the database: {source}")]
+    Open {
+        #[source]
+        source: Box<dyn StdError + Send + Sync>,
+    },
+    #[error("GraphiteSQL query failed: {source}")]
+    Query {
+        #[source]
+        source: Box<dyn StdError + Send + Sync>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,8 +65,8 @@ impl ReadOnlyConnection {
         self.inner
             .query(sql)
             .map(convert_query_result)
-            .map_err(|error| GraphiteAdapterError::Query {
-                message: error.to_string(),
+            .map_err(|source| GraphiteAdapterError::Query {
+                source: Box::new(source),
             })
     }
 }
@@ -172,9 +179,9 @@ pub fn open_readonly(
     let vfs = SqlCipherVfs::new(path, config, passphrase)?;
     check_companion_files(&vfs.main_path)?;
     let inner =
-        GraphiteConnection::open_readonly_vfs(&vfs, &vfs.main_path_utf8).map_err(|error| {
+        GraphiteConnection::open_readonly_vfs(&vfs, &vfs.main_path_utf8).map_err(|source| {
             GraphiteAdapterError::Open {
-                message: error.to_string(),
+                source: Box::new(source),
             }
         })?;
     Ok(ReadOnlyConnection { inner })
