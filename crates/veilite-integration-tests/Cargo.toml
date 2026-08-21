@@ -1,0 +1,9 @@
+[package]
+name = "veilite-integration-tests"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dev-dependencies]
+veilite-core.workspace = true
+veilite-graphitesql.workspace = true

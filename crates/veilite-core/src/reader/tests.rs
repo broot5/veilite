@@ -1,143 +1,8 @@
 use std::io;
 use std::num::NonZeroU32;
-use std::path::PathBuf;
 
 use super::*;
-use crate::decryptor::PageDecryptor;
-use crate::test_support::{FIXTURE_CASES, FixtureCase, PRESET_FIXTURE_CASES, SQLCIPHER4_CASE};
-use crate::{CipherPreset, FileSource, SliceSource};
-
-impl FixtureCase {
-    fn reader(self) -> SqlCipherReader<SliceSource<'static>> {
-        SqlCipherReader::open(
-            SliceSource::new(self.fixture),
-            self.config(),
-            self.passphrase,
-        )
-        .unwrap_or_else(|error| panic!("{} reader failed to open: {error}", self.name))
-    }
-
-    fn plaintext(self) -> Zeroizing<Vec<u8>> {
-        let salt = self.fixture[..16].try_into().unwrap();
-        let decryptor = PageDecryptor::new(self.config(), self.passphrase, salt).unwrap();
-        let page_size = decryptor.page_size();
-        let mut plaintext = Zeroizing::new(self.fixture.to_vec());
-
-        for (index, page) in plaintext.chunks_exact_mut(page_size).enumerate() {
-            let page_no =
-                NonZeroU32::new(u32::try_from(index + 1).expect("fixture page number fits"))
-                    .expect("fixture page numbers start at one");
-            decryptor.decrypt_page_in_place(page_no, page).unwrap();
-        }
-
-        plaintext
-    }
-}
-
-#[test]
-fn opens_supported_fixture_metadata() {
-    for case in FIXTURE_CASES {
-        let reader = case.reader();
-
-        assert_eq!(reader.file_size(), case.fixture.len() as u64);
-        let page_size = case.config().page_size();
-        assert_eq!(reader.page_size(), page_size);
-        assert_eq!(
-            reader.page_count(),
-            u32::try_from(case.fixture.len() / page_size).expect("fixture page count fits in u32")
-        );
-    }
-}
-
-#[test]
-fn defers_passphrase_authentication_until_the_first_page_read() {
-    for case in FIXTURE_CASES {
-        let reader = SqlCipherReader::open(
-            SliceSource::new(case.fixture),
-            case.config(),
-            b"wrong passphrase",
-        )
-        .expect("opening a reader should only derive keys");
-        let mut output = vec![0xaa; reader.page_size()];
-
-        let error = reader
-            .read_page_into(NonZeroU32::new(1).unwrap(), &mut output)
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            ReaderError::Decrypt(DecryptError::AuthenticationFailed { page_no: 1 })
-        ));
-        assert!(output.iter().all(|byte| *byte == 0));
-    }
-}
-
-#[test]
-fn reads_single_pages() {
-    for case in FIXTURE_CASES {
-        let reader = case.reader();
-        let expected = case.plaintext();
-        let page_size = reader.page_size();
-
-        for page_no in [1, reader.page_count()] {
-            let mut output = vec![0; page_size];
-            reader
-                .read_page_into(NonZeroU32::new(page_no).unwrap(), &mut output)
-                .unwrap();
-            let start = (page_no as usize - 1) * page_size;
-
-            assert_eq!(output, expected[start..start + page_size], "{}", case.name);
-        }
-    }
-}
-
-#[test]
-fn rejects_invalid_output_page_lengths_and_clears_output() {
-    for case in PRESET_FIXTURE_CASES {
-        let reader = case.reader();
-        let page_size = reader.page_size();
-
-        for actual in [page_size - 1, page_size + 1] {
-            let mut output = vec![0xaa; actual];
-
-            let error = reader
-                .read_page_into(NonZeroU32::new(1).unwrap(), &mut output)
-                .unwrap_err();
-
-            assert!(matches!(
-                error,
-                ReaderError::InvalidOutputPageLength {
-                    expected: error_expected,
-                    actual: error_actual,
-                } if error_expected == page_size && error_actual == actual
-            ));
-            assert!(output.iter().all(|byte| *byte == 0));
-        }
-    }
-}
-
-#[test]
-fn reads_ranges_within_and_across_pages() {
-    for case in FIXTURE_CASES {
-        let reader = case.reader();
-        let expected = case.plaintext();
-        let page_size = reader.page_size();
-        let ranges = [
-            (0, 100),
-            (page_size / 2, 200),
-            (page_size - 31, 97),
-            (page_size * 2 - 7, page_size + 23),
-            (expected.len() - 1, 1),
-        ];
-
-        for (offset, length) in ranges {
-            let mut output = vec![0; length];
-            reader.read_exact_at(offset as u64, &mut output).unwrap();
-
-            assert_eq!(output, expected[offset..offset + length], "{}", case.name);
-        }
-    }
-}
+use crate::{CipherPreset, SliceSource};
 
 #[test]
 fn rejects_invalid_file_sizes_before_key_derivation() {
@@ -151,7 +16,8 @@ fn rejects_invalid_file_sizes_before_key_derivation() {
             ReaderError::FileTooSmall {
                 file_size,
                 page_size: actual_page_size,
-            } if file_size == (page_size - 1) as u64 && actual_page_size == page_size
+            } if file_size == u64::try_from(page_size - 1).unwrap()
+                && actual_page_size == page_size
         ));
 
         let incomplete = vec![0; page_size + 1];
@@ -160,7 +26,8 @@ fn rejects_invalid_file_sizes_before_key_derivation() {
             ReaderError::InvalidFileSize {
                 file_size,
                 page_size: actual_page_size,
-            } if file_size == (page_size + 1) as u64 && actual_page_size == page_size
+            } if file_size == u64::try_from(page_size + 1).unwrap()
+                && actual_page_size == page_size
         ));
     }
 }
@@ -199,7 +66,7 @@ fn rejects_more_pages_than_u32_can_address() {
     for preset in [CipherPreset::SqlCipher3, CipherPreset::SqlCipher4] {
         let config = CipherConfig::from(preset);
         let source = LengthOnlySource {
-            length: page_count * config.page_size() as u64,
+            length: page_count * u64::try_from(config.page_size()).unwrap(),
         };
         let Err(error) = SqlCipherReader::open(source, config, b"passphrase") else {
             panic!("oversized database should be rejected");
@@ -215,20 +82,50 @@ fn rejects_more_pages_than_u32_can_address() {
 }
 
 #[test]
+fn rejects_invalid_output_page_lengths_and_clears_output() {
+    for preset in [CipherPreset::SqlCipher3, CipherPreset::SqlCipher4] {
+        let config = CipherConfig::from(preset);
+        let encrypted = vec![0; config.page_size()];
+        let reader =
+            SqlCipherReader::open(SliceSource::new(&encrypted), config, b"passphrase").unwrap();
+
+        for actual in [config.page_size() - 1, config.page_size() + 1] {
+            let mut output = vec![0xaa; actual];
+
+            let error = reader
+                .read_page_into(NonZeroU32::new(1).unwrap(), &mut output)
+                .unwrap_err();
+
+            assert!(matches!(
+                error,
+                ReaderError::InvalidOutputPageLength {
+                    expected,
+                    actual: error_actual,
+                } if expected == config.page_size() && error_actual == actual
+            ));
+            assert!(output.iter().all(|byte| *byte == 0));
+        }
+    }
+}
+
+#[test]
 fn rejects_out_of_range_pages_and_reads() {
-    for case in PRESET_FIXTURE_CASES {
-        let reader = case.reader();
+    for preset in [CipherPreset::SqlCipher3, CipherPreset::SqlCipher4] {
+        let config = CipherConfig::from(preset);
+        let encrypted = vec![0; config.page_size()];
+        let reader =
+            SqlCipherReader::open(SliceSource::new(&encrypted), config, b"passphrase").unwrap();
         let mut page = vec![0xaa; reader.page_size()];
-        let page_no = reader.page_count() + 1;
+
         let error = reader
-            .read_page_into(NonZeroU32::new(page_no).unwrap(), &mut page)
+            .read_page_into(NonZeroU32::new(2).unwrap(), &mut page)
             .unwrap_err();
         assert!(matches!(
             error,
             ReaderError::PageOutOfRange {
-                page_no: actual_page_no,
-                page_count
-            } if actual_page_no == page_no && page_count == reader.page_count()
+                page_no: 2,
+                page_count: 1,
+            }
         ));
         assert!(page.iter().all(|byte| *byte == 0));
 
@@ -247,39 +144,16 @@ fn rejects_out_of_range_pages_and_reads() {
     }
 }
 
-#[test]
-fn clears_partial_plaintext_when_a_later_page_fails_authentication() {
-    for case in FIXTURE_CASES {
-        let page_size = case.config().page_size();
-        let mut tampered = case.fixture.to_vec();
-        tampered[page_size + 16] ^= 1;
-        let reader =
-            SqlCipherReader::open(SliceSource::new(&tampered), case.config(), case.passphrase)
-                .unwrap();
-        let mut output = vec![0xaa; 64];
-
-        let error = reader
-            .read_exact_at((page_size - 32) as u64, &mut output)
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            ReaderError::Decrypt(DecryptError::AuthenticationFailed { page_no: 2 })
-        ));
-        assert!(output.iter().all(|byte| *byte == 0));
-    }
-}
-
-struct MisreportedLengthSource<'a> {
-    bytes: &'a [u8],
+struct MisreportedLengthSource {
+    bytes: Vec<u8>,
     reported_length: u64,
 }
 
-impl ReadAt for MisreportedLengthSource<'_> {
+impl ReadAt for MisreportedLengthSource {
     type Error = io::Error;
 
     fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> io::Result<()> {
-        SliceSource::new(self.bytes).read_exact_at(offset, output)
+        SliceSource::new(&self.bytes).read_exact_at(offset, output)
     }
 
     fn len(&self) -> io::Result<u64> {
@@ -289,12 +163,12 @@ impl ReadAt for MisreportedLengthSource<'_> {
 
 #[test]
 fn rejects_short_source_reads_and_clears_output() {
-    let case = SQLCIPHER4_CASE;
+    let config = CipherConfig::from(CipherPreset::SqlCipher4);
     let source = MisreportedLengthSource {
-        bytes: &case.fixture[..case.fixture.len() - 1],
-        reported_length: case.fixture.len() as u64,
+        bytes: vec![0; config.page_size() * 2 - 1],
+        reported_length: u64::try_from(config.page_size() * 2).unwrap(),
     };
-    let reader = SqlCipherReader::open(source, case.config(), case.passphrase).unwrap();
+    let reader = SqlCipherReader::open(source, config, b"passphrase").unwrap();
     let mut output = vec![0xaa; reader.page_size()];
 
     let error = reader
@@ -307,24 +181,4 @@ fn rejects_short_source_reads_and_clears_output() {
             if source_error.kind() == io::ErrorKind::UnexpectedEof
     ));
     assert!(output.iter().all(|byte| *byte == 0));
-}
-
-#[test]
-fn reads_ranges_from_file_source() {
-    let case = SQLCIPHER4_CASE;
-    let fixture_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/sqlcipher4/encrypted.db");
-    let reader = SqlCipherReader::open(
-        FileSource::open(fixture_path).unwrap(),
-        case.config(),
-        case.passphrase,
-    )
-    .unwrap();
-    let expected = case.plaintext();
-    let offset = reader.page_size() - 17;
-    let mut output = vec![0; 100];
-
-    reader.read_exact_at(offset as u64, &mut output).unwrap();
-
-    assert_eq!(output, expected[offset..offset + output.len()]);
 }

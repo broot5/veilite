@@ -461,6 +461,8 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use clap::CommandFactory;
 
     use super::*;
@@ -621,5 +623,54 @@ mod tests {
             output,
             b"null|integer|real|text|blob\nNULL|-42|3.5|hello|X'00abff'\n"
         );
+    }
+
+    #[test]
+    fn preserves_existing_outputs_and_removes_failed_exports() {
+        let directory = TemporaryDirectory::new();
+        let input_path = directory.path().join("encrypted.db");
+        let existing_output_path = directory.path().join("existing.db");
+        let partial_output_path = directory.path().join("partial.db");
+        let config = CipherConfig::from(CipherPreset::SqlCipher4);
+        fs::write(&input_path, vec![0; config.page_size()]).unwrap();
+        fs::write(&existing_output_path, b"keep this").unwrap();
+        let reader = SqlCipherReader::open(
+            FileSource::open(&input_path).unwrap(),
+            config,
+            b"test-passphrase",
+        )
+        .unwrap();
+
+        assert!(write_decrypted_database(&existing_output_path, &reader).is_err());
+        assert_eq!(fs::read(&existing_output_path).unwrap(), b"keep this");
+
+        assert!(write_decrypted_database(&partial_output_path, &reader).is_err());
+        assert!(!partial_output_path.exists());
+    }
+
+    static NEXT_TEMPORARY_DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct TemporaryDirectory {
+        path: PathBuf,
+    }
+
+    impl TemporaryDirectory {
+        fn new() -> Self {
+            let id = NEXT_TEMPORARY_DIRECTORY_ID.fetch_add(1, Ordering::Relaxed);
+            let path =
+                std::env::temp_dir().join(format!("veilite-cli-tests-{}-{id}", std::process::id()));
+            fs::create_dir(&path).unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TemporaryDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
     }
 }

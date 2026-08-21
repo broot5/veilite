@@ -3,6 +3,7 @@ members = [
     "crates/veilite-core",
     "crates/veilite-graphitesql",
     "crates/veilite-cli",
+    "crates/veilite-integration-tests",
 ]
 resolver = "3"
 

@@ -2,8 +2,6 @@ mod config;
 mod decryptor;
 mod reader;
 mod source;
-#[cfg(test)]
-mod test_support;
 
 pub use config::{CipherConfig, CipherConfigError, CipherPreset, HashAlgorithm};
 pub use decryptor::DecryptError;

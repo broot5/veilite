@@ -1,220 +1,38 @@
 use std::num::NonZeroU32;
-use std::sync::OnceLock;
 
-use zeroize::Zeroizing;
+use aes::cipher::{BlockModeEncrypt, KeyIvInit, block_padding::NoPadding};
+use hmac::{KeyInit, Mac};
 
 use super::*;
-use crate::test_support::{
-    FIXTURE_CASES, FixtureCase, FixtureCipher, PRESET_FIXTURE_CASES, SQLCIPHER_CUSTOM_CASE,
-    SQLCIPHER3_CASE, SQLCIPHER4_CASE,
-};
-
-impl FixtureCase {
-    fn page_decryptor(self) -> &'static PageDecryptor {
-        match self.cipher {
-            FixtureCipher::SqlCipher3 => sqlcipher3_page_decryptor(),
-            FixtureCipher::SqlCipher4 => sqlcipher4_page_decryptor(),
-            FixtureCipher::Custom => sqlcipher_custom_page_decryptor(),
-        }
-    }
-}
-
-fn sqlcipher_custom_page_decryptor() -> &'static PageDecryptor {
-    static DECRYPTOR: OnceLock<PageDecryptor> = OnceLock::new();
-    DECRYPTOR.get_or_init(|| fixture_page_decryptor(SQLCIPHER_CUSTOM_CASE))
-}
-
-fn sqlcipher3_page_decryptor() -> &'static PageDecryptor {
-    static DECRYPTOR: OnceLock<PageDecryptor> = OnceLock::new();
-    DECRYPTOR.get_or_init(|| fixture_page_decryptor(SQLCIPHER3_CASE))
-}
-
-fn sqlcipher4_page_decryptor() -> &'static PageDecryptor {
-    static DECRYPTOR: OnceLock<PageDecryptor> = OnceLock::new();
-    DECRYPTOR.get_or_init(|| fixture_page_decryptor(SQLCIPHER4_CASE))
-}
-
-fn fixture_page_decryptor(case: FixtureCase) -> PageDecryptor {
-    let salt: &[u8; 16] = case.fixture[..16].try_into().expect("fixture has a salt");
-    PageDecryptor::new(case.config(), case.passphrase, salt)
-        .expect("fixture passphrase is non-empty")
-}
-
-fn decrypt_fixture_pages(
-    decryptor: &PageDecryptor,
-    encrypted: &[u8],
-) -> Result<Zeroizing<Vec<u8>>, DecryptError> {
-    let page_size = decryptor.page_size();
-    let mut plaintext = Zeroizing::new(encrypted.to_vec());
-
-    for (index, page) in plaintext.chunks_exact_mut(page_size).enumerate() {
-        let page_no = NonZeroU32::new(u32::try_from(index + 1).expect("fixture page number fits"))
-            .expect("fixture page numbers start at one");
-        decryptor.decrypt_page_in_place(page_no, page)?;
-    }
-
-    Ok(plaintext)
-}
-
-fn first_page_with_changed_header_byte(
-    case: FixtureCase,
-    header_offset: usize,
-    original: u8,
-    replacement: u8,
-) -> Vec<u8> {
-    assert!((16..32).contains(&header_offset));
-
-    let decryptor = case.page_decryptor();
-    let page_size = case.page_size;
-    let mut page = case.fixture[..page_size].to_vec();
-    let ciphertext_end = page_size - case.reserve_size;
-    let iv_end = ciphertext_end + AES_BLOCK_SIZE;
-    let hmac_end = iv_end + decryptor.config.hmac_algorithm().output_len();
-    page[ciphertext_end + header_offset - 16] ^= original ^ replacement;
-
-    match decryptor.config.hmac_algorithm() {
-        HashAlgorithm::Sha1 => {
-            let tag = hmac::Hmac::<Sha1>::new_from_slice(&decryptor.keys.hmac_key)
-                .unwrap()
-                .chain_update(&page[16..ciphertext_end])
-                .chain_update(&page[ciphertext_end..iv_end])
-                .chain_update(1_u32.to_le_bytes())
-                .finalize()
-                .into_bytes();
-            page[iv_end..hmac_end].copy_from_slice(&tag);
-        }
-        HashAlgorithm::Sha256 => {
-            let tag = hmac::Hmac::<Sha256>::new_from_slice(&decryptor.keys.hmac_key)
-                .unwrap()
-                .chain_update(&page[16..ciphertext_end])
-                .chain_update(&page[ciphertext_end..iv_end])
-                .chain_update(1_u32.to_le_bytes())
-                .finalize()
-                .into_bytes();
-            page[iv_end..hmac_end].copy_from_slice(&tag);
-        }
-        HashAlgorithm::Sha512 => {
-            let tag = hmac::Hmac::<Sha512>::new_from_slice(&decryptor.keys.hmac_key)
-                .unwrap()
-                .chain_update(&page[16..ciphertext_end])
-                .chain_update(&page[ciphertext_end..iv_end])
-                .chain_update(1_u32.to_le_bytes())
-                .finalize()
-                .into_bytes();
-            page[iv_end..hmac_end].copy_from_slice(&tag);
-        }
-    }
-    page
-}
 
 #[test]
-fn decrypts_supported_fixtures() {
-    for case in FIXTURE_CASES {
-        let plaintext = decrypt_fixture_pages(case.page_decryptor(), case.fixture)
-            .unwrap_or_else(|error| panic!("{:?}: {error}", case.cipher));
-        let page_size = case.page_size;
-        let reserve_size = case.reserve_size;
-
-        assert_eq!(case.config().page_size(), page_size);
-        assert_eq!(&plaintext[..16], SQLITE_HEADER_MAGIC);
-        assert_eq!(
-            u16::from_be_bytes([plaintext[16], plaintext[17]]),
-            u16::try_from(page_size).expect("fixture page size fits in u16")
-        );
-        assert_eq!(usize::from(plaintext[20]), reserve_size);
-        assert_eq!(
-            u32::from_be_bytes(plaintext[60..64].try_into().unwrap()),
-            42
-        );
-        assert_eq!(
-            u32::from_be_bytes(plaintext[68..72].try_into().unwrap()),
-            0x5645_4c49
-        );
-        assert!(plaintext.chunks_exact(page_size).all(|page| {
-            page[page_size - reserve_size..]
-                .iter()
-                .all(|byte| *byte == 0)
-        }));
-    }
-}
-
-#[test]
-fn ignores_unauthenticated_sqlcipher3_filler() {
-    let expected = decrypt_fixture_pages(sqlcipher3_page_decryptor(), SQLCIPHER3_CASE.fixture)
-        .expect("fixture should decrypt");
-    let mut tampered = SQLCIPHER3_CASE.fixture.to_vec();
-
-    for page in tampered.chunks_exact_mut(SQLCIPHER3_CASE.page_size) {
-        let filler_start = page.len() - 12;
-        page[filler_start] ^= 1;
-        page[page.len() - 1] ^= 1;
-    }
-
-    let actual = decrypt_fixture_pages(sqlcipher3_page_decryptor(), &tampered)
-        .expect("unauthenticated filler should be ignored");
-
-    assert_eq!(actual.as_slice(), expected.as_slice());
-}
-
-#[test]
-fn rejects_tampering_in_ciphertext_iv_and_hmac() {
-    for case in FIXTURE_CASES {
-        let iv_start = case.page_size - case.reserve_size;
-        let hmac_start = iv_start + AES_BLOCK_SIZE;
-
-        for index in [16, iv_start, hmac_start] {
-            let mut tampered = case.fixture[..case.page_size].to_vec();
-            tampered[index] ^= 1;
-            assert_eq!(
-                case.page_decryptor()
-                    .decrypt_page_in_place(NonZeroU32::new(1).unwrap(), &mut tampered)
-                    .unwrap_err(),
-                DecryptError::AuthenticationFailed { page_no: 1 }
-            );
-            assert!(tampered.iter().all(|byte| *byte == 0));
-        }
+fn rejects_empty_passphrase() {
+    for config in [
+        CipherConfig::from(crate::CipherPreset::SqlCipher3),
+        CipherConfig::from(crate::CipherPreset::SqlCipher4),
+    ] {
+        assert!(matches!(
+            PageDecryptor::new(config, b"", &[0x42; 16]),
+            Err(DecryptError::EmptyPassphrase)
+        ));
     }
 }
 
 #[test]
 fn rejects_all_zero_physical_pages() {
-    for case in FIXTURE_CASES {
-        let mut page = vec![0; case.page_size];
+    for config in [
+        CipherConfig::from(crate::CipherPreset::SqlCipher3),
+        CipherConfig::from(crate::CipherPreset::SqlCipher4),
+    ] {
+        let decryptor = PageDecryptor::new(config, b"passphrase", &[0x42; 16]).unwrap();
+        let mut page = vec![0; config.page_size()];
 
-        let error = case
-            .page_decryptor()
+        let error = decryptor
             .decrypt_page_in_place(NonZeroU32::new(1).unwrap(), &mut page)
             .unwrap_err();
 
         assert_eq!(error, DecryptError::AuthenticationFailed { page_no: 1 });
-    }
-}
-
-#[test]
-fn page_number_is_authenticated() {
-    for case in FIXTURE_CASES {
-        let page_size = case.page_size;
-        let mut second_page = case.fixture[page_size..2 * page_size].to_vec();
-
-        assert_eq!(
-            case.page_decryptor()
-                .decrypt_page_in_place(NonZeroU32::new(3).unwrap(), &mut second_page)
-                .unwrap_err(),
-            DecryptError::AuthenticationFailed { page_no: 3 }
-        );
-        assert!(second_page.iter().all(|byte| *byte == 0));
-    }
-}
-
-#[test]
-fn rejects_empty_passphrase() {
-    for case in PRESET_FIXTURE_CASES {
-        let salt: &[u8; 16] = case.fixture[..16].try_into().unwrap();
-
-        assert!(matches!(
-            PageDecryptor::new(case.config(), b"", salt),
-            Err(DecryptError::EmptyPassphrase)
-        ));
+        assert!(page.iter().all(|byte| *byte == 0));
     }
 }
 
@@ -291,52 +109,67 @@ fn decodes_sqlite_page_size_header_encoding() {
 }
 
 #[test]
-fn rejects_mismatched_sqlite_header_fields() {
-    for (case, other) in [
-        (PRESET_FIXTURE_CASES[0], PRESET_FIXTURE_CASES[1]),
-        (PRESET_FIXTURE_CASES[1], PRESET_FIXTURE_CASES[0]),
-    ] {
-        let encoded_page_size = u16::try_from(case.page_size)
-            .expect("fixture page size fits in u16")
-            .to_be_bytes();
-        let other_encoded_page_size = u16::try_from(other.page_size)
-            .expect("fixture page size fits in u16")
-            .to_be_bytes();
-        let cases = [
-            (
-                first_page_with_changed_header_byte(
-                    case,
-                    16,
-                    encoded_page_size[0],
-                    other_encoded_page_size[0],
-                ),
-                DecryptError::InvalidSqlitePageSize {
-                    expected: case.page_size,
-                    actual: other.page_size,
-                },
+fn rejects_authenticated_pages_with_mismatched_sqlite_header_fields() {
+    let config = CipherConfig::new(1024, 1, HashAlgorithm::Sha256, HashAlgorithm::Sha256).unwrap();
+    let decryptor = PageDecryptor::new(config, b"passphrase", &[0x42; 16]).unwrap();
+    let cases = [
+        (
+            authenticated_first_page(
+                &decryptor,
+                [0x10, 0x00],
+                u8::try_from(config.reserve_size()).expect("reserve size fits in u8"),
             ),
-            (
-                first_page_with_changed_header_byte(
-                    case,
-                    20,
-                    u8::try_from(case.reserve_size).expect("fixture reserve size fits in u8"),
-                    u8::try_from(other.reserve_size).expect("fixture reserve size fits in u8"),
-                ),
-                DecryptError::InvalidSqliteReserveSize {
-                    expected: case.reserve_size,
-                    actual: other.reserve_size,
-                },
-            ),
-        ];
+            DecryptError::InvalidSqlitePageSize {
+                expected: 1024,
+                actual: 4096,
+            },
+        ),
+        (
+            authenticated_first_page(&decryptor, [0x04, 0x00], 80),
+            DecryptError::InvalidSqliteReserveSize {
+                expected: config.reserve_size(),
+                actual: 80,
+            },
+        ),
+    ];
 
-        for (mut page, expected_error) in cases {
-            let error = case
-                .page_decryptor()
-                .decrypt_page_in_place(NonZeroU32::new(1).unwrap(), &mut page)
-                .unwrap_err();
+    for (mut page, expected_error) in cases {
+        let error = decryptor
+            .decrypt_page_in_place(NonZeroU32::new(1).unwrap(), &mut page)
+            .unwrap_err();
 
-            assert_eq!(error, expected_error);
-            assert!(page.iter().all(|byte| *byte == 0));
-        }
+        assert_eq!(error, expected_error);
+        assert!(page.iter().all(|byte| *byte == 0));
     }
+}
+
+fn authenticated_first_page(
+    decryptor: &PageDecryptor,
+    sqlite_page_size: [u8; 2],
+    sqlite_reserve_size: u8,
+) -> Vec<u8> {
+    let config = decryptor.config;
+    let ciphertext_end = config.usable_end();
+    let iv_end = ciphertext_end + AES_BLOCK_SIZE;
+    let hmac_end = iv_end + HashAlgorithm::Sha256.output_len();
+    let iv = [0x24; AES_BLOCK_SIZE];
+    let mut page = vec![0; config.page_size()];
+    page[16..18].copy_from_slice(&sqlite_page_size);
+    page[20] = sqlite_reserve_size;
+    page[ciphertext_end..iv_end].copy_from_slice(&iv);
+
+    let plaintext_len = ciphertext_end - 16;
+    cbc::Encryptor::<aes::Aes256>::new((&decryptor.keys.encryption_key).into(), (&iv).into())
+        .encrypt_padded::<NoPadding>(&mut page[16..ciphertext_end], plaintext_len)
+        .expect("validated first-page plaintext is AES block-aligned");
+
+    let tag = hmac::Hmac::<sha2::Sha256>::new_from_slice(&decryptor.keys.hmac_key)
+        .expect("HMAC accepts keys of any length")
+        .chain_update(&page[16..ciphertext_end])
+        .chain_update(iv)
+        .chain_update(1_u32.to_le_bytes())
+        .finalize()
+        .into_bytes();
+    page[iv_end..hmac_end].copy_from_slice(&tag);
+    page
 }
