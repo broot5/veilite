@@ -5,7 +5,7 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use bstr::BStr;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use veilite_core::{CipherConfig, CipherPreset, FileSource, HashAlgorithm, SqlCipherReader};
@@ -13,7 +13,7 @@ use veilite_graphitesql::{QueryResult, Value, check_companion_files, open_readon
 use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Debug, Parser)]
-#[command(version, about = "Read supported SQLCipher databases")]
+#[command(version, about = "Read immutable SQLCipher main database snapshots")]
 struct CliArgs {
     #[command(subcommand)]
     command: Command,
@@ -21,16 +21,28 @@ struct CliArgs {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Decrypt a database into a SQLite file
+    /// Export an encrypted database as a plaintext SQLite image
+    ///
+    /// Input must be an immutable main database snapshot. Sibling -wal and
+    /// -journal files are rejected.
     Export(ExportArgs),
 
     /// Show encrypted database and cipher configuration information
+    ///
+    /// Reports sibling -wal and -journal files without opening the database or
+    /// reading a passphrase.
     Inspect(InspectArgs),
 
     /// Execute a read-only SQL query
+    ///
+    /// Input must be an immutable main database snapshot. Sibling -wal and
+    /// -journal files are rejected.
     Query(QueryArgs),
 
     /// Authenticate every encrypted database page
+    ///
+    /// Input must be an immutable main database snapshot. Sibling -wal and
+    /// -journal files are rejected.
     Verify(VerifyArgs),
 }
 
@@ -94,70 +106,119 @@ struct VerifyArgs {
 #[derive(Debug, Args)]
 struct PassphraseArgs {
     /// Read the passphrase from the first line of FILE instead of prompting
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, value_name = "FILE", help_heading = "Passphrase input")]
     passphrase_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
+#[command(
+    group(
+        ArgGroup::new("cipher_mode")
+            .required(true)
+            .multiple(false)
+            .args(["preset", "custom"])
+    ),
+    group(
+        ArgGroup::new("custom_configuration")
+            .multiple(true)
+            .args([
+                "page_size",
+                "kdf_iterations",
+                "kdf_algorithm",
+                "hmac_algorithm",
+            ])
+            .requires("custom")
+    )
+)]
 struct CipherArgs {
-    /// SQLCipher on-disk compatibility preset
+    /// Complete SQLCipher 3 or 4 default on-disk configuration
     #[arg(
         long,
         value_enum,
         value_name = "PRESET",
-        required_unless_present = "page_size",
-        conflicts_with_all = ["page_size", "kdf_iterations", "kdf_algorithm", "hmac_algorithm"]
+        help_heading = "Cipher configuration",
+        conflicts_with = "custom_configuration"
     )]
-    compatibility: Option<CipherPresetArg>,
+    preset: Option<CipherPresetArg>,
 
-    /// Cipher page size for a complete custom configuration
+    /// Supply a complete custom cipher configuration
     #[arg(
         long,
-        value_name = "BYTES",
-        required_unless_present = "compatibility",
-        requires_all = ["kdf_iterations", "kdf_algorithm", "hmac_algorithm"]
+        help_heading = "Cipher configuration",
+        requires_all = [
+            "page_size",
+            "kdf_iterations",
+            "kdf_algorithm",
+            "hmac_algorithm"
+        ]
     )]
+    custom: bool,
+
+    /// Cipher page size for a custom configuration
+    #[arg(long, value_name = "BYTES", help_heading = "Cipher configuration")]
     page_size: Option<usize>,
 
     /// Encryption key derivation iteration count
-    #[arg(long, value_name = "COUNT", requires = "page_size")]
+    #[arg(long, value_name = "COUNT", help_heading = "Cipher configuration")]
     kdf_iterations: Option<u32>,
 
     /// PBKDF2-HMAC algorithm for encryption and HMAC key derivation
-    #[arg(long, value_enum, value_name = "ALGORITHM", requires = "page_size")]
+    #[arg(
+        long,
+        value_enum,
+        value_name = "ALGORITHM",
+        help_heading = "Cipher configuration"
+    )]
     kdf_algorithm: Option<HashAlgorithmArg>,
 
     /// HMAC algorithm for page authentication
-    #[arg(long, value_enum, value_name = "ALGORITHM", requires = "page_size")]
+    #[arg(
+        long,
+        value_enum,
+        value_name = "ALGORITHM",
+        help_heading = "Cipher configuration"
+    )]
     hmac_algorithm: Option<HashAlgorithmArg>,
 }
 
 impl CipherArgs {
     fn config(&self) -> Result<CipherConfig, Box<dyn Error>> {
-        if let Some(compatibility) = self.compatibility {
-            return Ok(compatibility.preset().into());
-        }
+        match (self.preset, self.custom) {
+            (Some(preset), false) => Ok(preset.preset().into()),
+            (None, true) => {
+                let (
+                    Some(page_size),
+                    Some(kdf_iterations),
+                    Some(kdf_algorithm),
+                    Some(hmac_algorithm),
+                ) = (
+                    self.page_size,
+                    self.kdf_iterations,
+                    self.kdf_algorithm,
+                    self.hmac_algorithm,
+                )
+                else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "provide all four cipher options with --custom",
+                    )
+                    .into());
+                };
 
-        let (Some(page_size), Some(kdf_iterations), Some(kdf_algorithm), Some(hmac_algorithm)) = (
-            self.page_size,
-            self.kdf_iterations,
-            self.kdf_algorithm,
-            self.hmac_algorithm,
-        ) else {
-            return Err(io::Error::new(
+                CipherConfig::new(
+                    page_size,
+                    kdf_iterations,
+                    kdf_algorithm.into(),
+                    hmac_algorithm.into(),
+                )
+                .map_err(Into::into)
+            }
+            _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "custom cipher configuration is incomplete",
+                "select exactly one of --preset <3|4> or --custom",
             )
-            .into());
-        };
-
-        CipherConfig::new(
-            page_size,
-            kdf_iterations,
-            kdf_algorithm.into(),
-            hmac_algorithm.into(),
-        )
-        .map_err(Into::into)
+            .into()),
+        }
     }
 }
 
@@ -297,10 +358,10 @@ fn inspect(args: InspectArgs) -> Result<(), Box<dyn Error>> {
     let journal_path = companion_path(&args.input_path, "-journal");
 
     println!("path: {}", args.input_path.display());
-    match args.cipher.compatibility {
-        Some(compatibility) => {
+    match args.cipher.preset {
+        Some(preset) => {
             println!("configuration: preset");
-            println!("compatibility: {}", compatibility.number());
+            println!("preset: {}", preset.number());
         }
         None => println!("configuration: custom"),
     }
@@ -464,7 +525,7 @@ fn main() {
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use clap::CommandFactory;
+    use clap::{CommandFactory, error::ErrorKind};
 
     use super::*;
 
@@ -489,21 +550,21 @@ mod tests {
             vec![
                 "veilite",
                 "export",
-                "--compatibility",
+                "--preset",
                 "4",
                 "encrypted.db",
                 "plaintext.db",
             ],
-            vec!["veilite", "inspect", "--compatibility", "4", "encrypted.db"],
+            vec!["veilite", "inspect", "--preset", "4", "encrypted.db"],
             vec![
                 "veilite",
                 "query",
-                "--compatibility",
+                "--preset",
                 "4",
                 "encrypted.db",
                 "SELECT 1",
             ],
-            vec!["veilite", "verify", "--compatibility", "4", "encrypted.db"],
+            vec!["veilite", "verify", "--preset", "4", "encrypted.db"],
         ] {
             assert_eq!(
                 parse_cipher_config(&args).unwrap(),
@@ -517,6 +578,7 @@ mod tests {
         let expected =
             CipherConfig::new(2048, 100_000, HashAlgorithm::Sha256, HashAlgorithm::Sha256).unwrap();
         let custom = [
+            "--custom",
             "--page-size",
             "2048",
             "--kdf-iterations",
@@ -548,11 +610,18 @@ mod tests {
     fn rejects_missing_partial_and_mixed_cipher_configuration() {
         for args in [
             vec!["veilite", "inspect", "encrypted.db"],
-            vec!["veilite", "inspect", "--page-size", "2048", "encrypted.db"],
             vec![
                 "veilite",
                 "inspect",
-                "--compatibility",
+                "--custom",
+                "--page-size",
+                "2048",
+                "encrypted.db",
+            ],
+            vec![
+                "veilite",
+                "inspect",
+                "--preset",
                 "4",
                 "--page-size",
                 "2048",
@@ -567,6 +636,22 @@ mod tests {
         ] {
             assert!(CliArgs::try_parse_from(args).is_err());
         }
+    }
+
+    #[test]
+    fn reports_preset_and_custom_configuration_as_conflicting() {
+        let error = CliArgs::try_parse_from([
+            "veilite",
+            "inspect",
+            "--preset",
+            "4",
+            "--kdf-iterations",
+            "100000",
+            "encrypted.db",
+        ])
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
     }
 
     #[test]
