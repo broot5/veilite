@@ -385,6 +385,7 @@ fn inspect(args: InspectArgs) -> Result<(), Box<dyn Error>> {
 
 fn query(args: QueryArgs) -> Result<(), Box<dyn Error>> {
     let config = args.cipher.config()?;
+    check_companion_files(&args.input_path)?;
     let passphrase = read_passphrase(&args.passphrase)?;
     let connection = open_readonly(&args.input_path, config, passphrase.as_slice())?;
     drop(passphrase);
