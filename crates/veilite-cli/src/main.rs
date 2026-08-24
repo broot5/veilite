@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
+use bstr::BStr;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -413,7 +414,7 @@ fn presence(path: &Path) -> io::Result<&'static str> {
 
 fn write_query_result(mut output: impl Write, result: &QueryResult) -> io::Result<()> {
     write_cells(&mut output, &result.columns, |column, output| {
-        output.write_all(column.as_bytes())
+        write!(output, "{column:?}")
     })?;
 
     for row in &result.rows {
@@ -441,7 +442,7 @@ fn write_value(value: &Value, output: &mut dyn Write) -> io::Result<()> {
         Value::Null => output.write_all(b"NULL"),
         Value::Integer(value) => write!(output, "{value}"),
         Value::Real(value) => write!(output, "{value}"),
-        Value::Text(value) => output.write_all(value),
+        Value::Text(value) => write!(output, "{:?}", BStr::new(value)),
         Value::Blob(value) => {
             output.write_all(b"X'")?;
             for byte in value {
@@ -605,6 +606,8 @@ mod tests {
                 "integer".into(),
                 "real".into(),
                 "text".into(),
+                "escaped".into(),
+                "invalid UTF-8".into(),
                 "blob".into(),
             ],
             rows: vec![vec![
@@ -612,6 +615,8 @@ mod tests {
                 Value::Integer(-42),
                 Value::Real(3.5),
                 Value::Text(b"hello".to_vec()),
+                Value::Text("pipe|line\n홍길동".as_bytes().to_vec()),
+                Value::Text(vec![b'a', 0xff]),
                 Value::Blob(vec![0x00, 0xab, 0xff]),
             ]],
         };
@@ -621,7 +626,13 @@ mod tests {
 
         assert_eq!(
             output,
-            b"null|integer|real|text|blob\nNULL|-42|3.5|hello|X'00abff'\n"
+            concat!(
+                "\"null\"|\"integer\"|\"real\"|\"text\"|\"escaped\"|",
+                "\"invalid UTF-8\"|\"blob\"\n",
+                "NULL|-42|3.5|\"hello\"|\"pipe|line\\n홍길동\"|",
+                "\"a\\xff\"|X'00abff'\n"
+            )
+            .as_bytes()
         );
     }
 
