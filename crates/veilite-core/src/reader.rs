@@ -8,36 +8,83 @@ use crate::{CipherConfig, DecryptError, ReadAt};
 
 const DATABASE_SALT_SIZE: usize = 16;
 
+/// Error returned while opening or reading an encrypted database source.
 #[derive(Debug, Error)]
 pub enum ReaderError<E> {
+    /// The underlying random-access source failed.
     #[error("source read failed: {0}")]
     Source(#[source] E),
+    /// Key derivation, page authentication, or page decryption failed.
     #[error("database decryption failed: {0}")]
     Decrypt(#[from] DecryptError),
+    /// A page destination buffer had the wrong length.
     #[error("invalid output page length: expected {expected} bytes, got {actual}")]
-    InvalidOutputPageLength { expected: usize, actual: usize },
+    InvalidOutputPageLength {
+        /// Required destination length in bytes.
+        expected: usize,
+        /// Supplied destination length in bytes.
+        actual: usize,
+    },
+    /// The encrypted source is empty.
     #[error("the encrypted database is empty")]
     EmptyFile,
+    /// The encrypted source is shorter than one physical page.
     #[error(
         "encrypted database is shorter than one page: {file_size} bytes for a {page_size}-byte page"
     )]
-    FileTooSmall { file_size: u64, page_size: usize },
+    FileTooSmall {
+        /// Source length in bytes.
+        file_size: u64,
+        /// Configured page size in bytes.
+        page_size: usize,
+    },
+    /// The source length is not a multiple of the configured page size.
     #[error("encrypted database size {file_size} is not a multiple of page size {page_size}")]
-    InvalidFileSize { file_size: u64, page_size: usize },
+    InvalidFileSize {
+        /// Source length in bytes.
+        file_size: u64,
+        /// Configured page size in bytes.
+        page_size: usize,
+    },
+    /// The source contains more pages than the one-based `u32` API can address.
     #[error("encrypted database has too many pages: {page_count}")]
-    TooManyPages { page_count: u64 },
+    TooManyPages {
+        /// Page count calculated from the source length.
+        page_count: u64,
+    },
+    /// A requested page number is outside the physical database.
     #[error("page {page_no} is outside the database page range 1..={page_count}")]
-    PageOutOfRange { page_no: u32, page_count: u32 },
+    PageOutOfRange {
+        /// Requested one-based page number.
+        page_no: u32,
+        /// Number of physical pages in the source.
+        page_count: u32,
+    },
+    /// A byte offset or range could not be represented safely.
     #[error("read range at offset {offset} with length {length} overflows")]
-    OffsetOverflow { offset: u64, length: usize },
+    OffsetOverflow {
+        /// Requested starting offset or page index involved in the calculation.
+        offset: u64,
+        /// Requested range length in bytes.
+        length: usize,
+    },
+    /// A requested byte range extends past the source length.
     #[error("read range at offset {offset} with length {length} exceeds database size {file_size}")]
     UnexpectedEof {
+        /// Requested starting offset in the plaintext database image.
         offset: u64,
+        /// Requested range length in bytes.
         length: usize,
+        /// Encrypted source length in bytes.
         file_size: u64,
     },
 }
 
+/// Authenticated random-access reader for an immutable SQLCipher main database.
+///
+/// Opening a reader derives keys and validates the physical source length. Page
+/// authentication remains lazy until [`read_page_into`](Self::read_page_into)
+/// or [`read_exact_at`](Self::read_exact_at) touches a page.
 pub struct SqlCipherReader<R> {
     source: R,
     decryptor: PageDecryptor,
@@ -46,6 +93,12 @@ pub struct SqlCipherReader<R> {
 }
 
 impl<R: ReadAt> SqlCipherReader<R> {
+    /// Opens an immutable encrypted source with a complete cipher configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReaderError`] if the source cannot be inspected, its length is
+    /// structurally invalid, the passphrase is empty, or key setup fails.
     pub fn open(
         source: R,
         config: CipherConfig,
@@ -90,21 +143,28 @@ impl<R: ReadAt> SqlCipherReader<R> {
         })
     }
 
+    /// Returns the configured physical page size in bytes.
     #[must_use]
     pub const fn page_size(&self) -> usize {
         self.decryptor.page_size()
     }
 
+    /// Returns the number of physical pages in the encrypted source.
     #[must_use]
     pub const fn page_count(&self) -> u32 {
         self.page_count
     }
 
+    /// Returns the encrypted source length in bytes.
     #[must_use]
     pub const fn file_size(&self) -> u64 {
         self.file_size
     }
 
+    /// Authenticates and decrypts one physical page into `output`.
+    ///
+    /// Page numbers are one-based. `output` must have exactly
+    /// [`page_size`](Self::page_size) bytes and is cleared on failure.
     pub fn read_page_into(
         &self,
         page_no: NonZeroU32,
@@ -147,6 +207,10 @@ impl<R: ReadAt> SqlCipherReader<R> {
         Ok(())
     }
 
+    /// Reads an exact range from the logical plaintext SQLite image.
+    ///
+    /// The range may span pages. Every touched page is authenticated before its
+    /// requested bytes are copied, and `output` is cleared on failure.
     pub fn read_exact_at(
         &self,
         offset: u64,

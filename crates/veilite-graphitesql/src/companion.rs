@@ -7,20 +7,36 @@ use thiserror::Error;
 const WAL_SUFFIX: &str = "-wal";
 const JOURNAL_SUFFIX: &str = "-journal";
 
+/// Error returned while enforcing the immutable main-database policy.
 #[derive(Debug, Error)]
 pub enum CompanionError {
+    /// A sibling write-ahead log is present.
     #[error("SQLCipher WAL companion file is unsupported: {path:?}")]
-    UnsupportedWal { path: PathBuf },
+    UnsupportedWal {
+        /// Detected `-wal` path.
+        path: PathBuf,
+    },
+    /// A sibling rollback journal is present.
     #[error("SQLCipher rollback journal companion file is unsupported: {path:?}")]
-    UnsupportedJournal { path: PathBuf },
+    UnsupportedJournal {
+        /// Detected `-journal` path.
+        path: PathBuf,
+    },
+    /// A companion path could not be inspected.
     #[error("failed to inspect companion path {path:?}: {source}")]
     Io {
+        /// Companion path being inspected.
         path: PathBuf,
+        /// Filesystem error returned while inspecting the path.
         #[source]
         source: io::Error,
     },
 }
 
+/// Rejects a main database path when an unsupported WAL or journal exists.
+///
+/// This function only performs a preflight check. Callers must still ensure the
+/// database remains an immutable snapshot throughout its use.
 pub fn check_companion_files(path: impl AsRef<Path>) -> Result<(), CompanionError> {
     let path = path.as_ref();
     let wal_path = companion_path(path, WAL_SUFFIX);
@@ -47,6 +63,7 @@ fn path_exists(path: &Path) -> Result<bool, CompanionError> {
     }
 }
 
+/// Constructs a sibling companion path by appending `suffix`.
 pub fn companion_path(path: &Path, suffix: &str) -> PathBuf {
     let mut companion = path.as_os_str().to_os_string();
     companion.push(suffix);

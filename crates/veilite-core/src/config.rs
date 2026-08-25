@@ -8,9 +8,12 @@ const DATABASE_SALT_SIZE: usize = 16;
 const IV_SIZE: usize = 16;
 const MIN_SQLITE_USABLE_SIZE: usize = 480;
 
+/// A supported SQLCipher default on-disk configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CipherPreset {
+    /// The SQLCipher 3 default compatibility profile.
     SqlCipher3,
+    /// The SQLCipher 4 default compatibility profile.
     SqlCipher4,
 }
 
@@ -28,10 +31,14 @@ impl From<CipherPreset> for CipherConfig {
     }
 }
 
+/// Hash algorithm used by PBKDF2 or page HMAC authentication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HashAlgorithm {
+    /// SHA-1.
     Sha1,
+    /// SHA-256.
     Sha256,
+    /// SHA-512.
     Sha512,
 }
 
@@ -46,6 +53,11 @@ impl HashAlgorithm {
     }
 }
 
+/// A complete supported SQLCipher on-disk configuration.
+///
+/// The configuration always uses passphrase-based key derivation, AES-256-CBC,
+/// page HMAC authentication, and a zero-length plaintext header. Use
+/// [`CipherPreset`] for the built-in SQLCipher 3 and 4 defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CipherConfig {
     page_size: usize,
@@ -55,6 +67,15 @@ pub struct CipherConfig {
 }
 
 impl CipherConfig {
+    /// Creates and validates a complete custom configuration.
+    ///
+    /// `page_size` must be a power of two from 1,024 through 65,536 bytes, and
+    /// `kdf_iterations` must be in `1..=i32::MAX`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CipherConfigError`] when a value or the resulting page layout
+    /// falls outside the supported format boundary.
     pub fn new(
         page_size: usize,
         kdf_iterations: u32,
@@ -94,26 +115,31 @@ impl CipherConfig {
         })
     }
 
+    /// Returns the encrypted database page size in bytes.
     #[must_use]
     pub const fn page_size(self) -> usize {
         self.page_size
     }
 
+    /// Returns the encryption-key PBKDF2 iteration count.
     #[must_use]
     pub const fn kdf_iterations(self) -> u32 {
         self.kdf_iterations
     }
 
+    /// Returns the hash algorithm used by both PBKDF2 derivations.
     #[must_use]
     pub const fn kdf_algorithm(self) -> HashAlgorithm {
         self.kdf_algorithm
     }
 
+    /// Returns the page authentication HMAC algorithm.
     #[must_use]
     pub const fn hmac_algorithm(self) -> HashAlgorithm {
         self.hmac_algorithm
     }
 
+    /// Returns the per-page reserve size calculated from the HMAC algorithm.
     #[must_use]
     pub const fn reserve_size(self) -> usize {
         reserve_size_for(self.hmac_algorithm)
@@ -130,17 +156,29 @@ const fn reserve_size_for(hmac_algorithm: HashAlgorithm) -> usize {
     (IV_SIZE + hmac_algorithm.output_len()).next_multiple_of(AES_BLOCK_SIZE)
 }
 
+/// Error returned when a custom cipher configuration is unsupported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum CipherConfigError {
+    /// The page size is outside the supported power-of-two range.
     #[error("invalid cipher page size {page_size}: expected a power of two from 1024 to 65536")]
-    InvalidPageSize { page_size: usize },
+    InvalidPageSize {
+        /// Rejected page size in bytes.
+        page_size: usize,
+    },
+    /// The PBKDF2 iteration count is outside the supported positive range.
     #[error("invalid KDF iteration count {kdf_iterations}: expected a value from 1 to 2147483647")]
-    InvalidKdfIterations { kdf_iterations: u32 },
+    InvalidKdfIterations {
+        /// Rejected iteration count.
+        kdf_iterations: u32,
+    },
+    /// The selected values cannot form a supported authenticated page layout.
     #[error(
         "invalid cipher page layout: page size {page_size} bytes with {reserve_size} reserved bytes"
     )]
     InvalidPageLayout {
+        /// Requested page size in bytes.
         page_size: usize,
+        /// Calculated per-page reserve size in bytes.
         reserve_size: usize,
     },
 }

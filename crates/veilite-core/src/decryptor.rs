@@ -19,28 +19,54 @@ struct KeyMaterial {
     hmac_key: [u8; 32],
 }
 
+/// Internal authenticated page decryptor.
+///
+/// Most callers should use [`crate::SqlCipherReader`], which validates source
+/// length and page numbers before invoking the decryptor.
 pub struct PageDecryptor {
     config: CipherConfig,
     keys: KeyMaterial,
 }
 
+/// Error returned while deriving keys or authenticating and decrypting a page.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum DecryptError {
+    /// An empty passphrase was supplied.
     #[error("the passphrase is empty")]
     EmptyPassphrase,
+    /// The authenticated first page declares a different SQLite page size.
     #[error(
         "invalid SQLite page size in the decrypted header: expected {expected} bytes, got {actual}"
     )]
-    InvalidSqlitePageSize { expected: usize, actual: usize },
+    InvalidSqlitePageSize {
+        /// Page size required by the selected cipher configuration.
+        expected: usize,
+        /// Page size decoded from the authenticated SQLite header.
+        actual: usize,
+    },
+    /// The authenticated first page declares a different SQLite reserve size.
     #[error(
         "invalid SQLite reserve size in the decrypted header: expected {expected} bytes, got {actual}"
     )]
-    InvalidSqliteReserveSize { expected: usize, actual: usize },
+    InvalidSqliteReserveSize {
+        /// Reserve size required by the selected cipher configuration.
+        expected: usize,
+        /// Reserve size decoded from the authenticated SQLite header.
+        actual: usize,
+    },
+    /// Page authentication failed.
+    ///
+    /// The format cannot distinguish a wrong passphrase or configuration from
+    /// corrupted or tampered page bytes.
     #[error("authentication failed for page {page_no}: wrong passphrase or corrupted data")]
-    AuthenticationFailed { page_no: u32 },
+    AuthenticationFailed {
+        /// One-based physical page number that failed authentication.
+        page_no: u32,
+    },
 }
 
 impl PageDecryptor {
+    /// Derives page encryption and HMAC keys from a passphrase and database salt.
     pub fn new(
         config: CipherConfig,
         passphrase: &[u8],
@@ -77,11 +103,15 @@ impl PageDecryptor {
         Ok(Self { config, keys })
     }
 
+    /// Returns the configured physical page size in bytes.
     #[must_use]
     pub const fn page_size(&self) -> usize {
         self.config.page_size()
     }
 
+    /// Authenticates and decrypts one physical page in place.
+    ///
+    /// The page buffer is cleared if authentication or header validation fails.
     pub fn decrypt_page_in_place(
         &self,
         page_no: NonZeroU32,

@@ -8,23 +8,29 @@ use std::path::Path;
 /// exists. Each read must use the supplied offset independently of any shared
 /// file cursor.
 pub trait ReadAt {
+    /// Error returned by source operations.
     type Error;
 
+    /// Reads exactly `output.len()` bytes beginning at the absolute `offset`.
     fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> Result<(), Self::Error>;
 
+    /// Returns the source length in bytes.
     fn len(&self) -> Result<u64, Self::Error>;
 
+    /// Returns whether the source contains zero bytes.
     fn is_empty(&self) -> Result<bool, Self::Error> {
         self.len().map(|length| length == 0)
     }
 }
 
+/// Immutable byte-slice implementation of [`ReadAt`].
 #[derive(Debug, Clone, Copy)]
 pub struct SliceSource<'a> {
     bytes: &'a [u8],
 }
 
 impl<'a> SliceSource<'a> {
+    /// Wraps an immutable byte slice as a random-access source.
     #[must_use]
     pub const fn new(bytes: &'a [u8]) -> Self {
         Self { bytes }
@@ -65,12 +71,17 @@ impl ReadAt for SliceSource<'_> {
     }
 }
 
+/// Cursor-independent file implementation of [`ReadAt`].
+///
+/// The file must remain unchanged while a reader uses it. File reads are
+/// supported on Unix and Windows.
 #[derive(Debug)]
 pub struct FileSource {
     file: File,
 }
 
 impl FileSource {
+    /// Opens a file for cursor-independent reads.
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         File::open(path).map(Self::from)
     }

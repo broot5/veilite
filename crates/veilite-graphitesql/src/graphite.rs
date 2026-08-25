@@ -23,44 +23,65 @@ const READ_ONLY_ERROR: &str = "database is read-only";
 const WAL_ERROR: &str = "SQLCipher WAL files are unsupported";
 const JOURNAL_ERROR: &str = "SQLCipher rollback journals are unsupported";
 
+/// Error returned while opening or querying through the GraphiteSQL adapter.
 #[derive(Debug, Error)]
 pub enum GraphiteAdapterError {
+    /// GraphiteSQL cannot represent the database path as UTF-8.
     #[error("database path is not valid UTF-8: {path:?}")]
-    NonUtf8Path { path: PathBuf },
+    NonUtf8Path {
+        /// Rejected database path.
+        path: PathBuf,
+    },
+    /// The immutable snapshot companion-file policy was not satisfied.
     #[error(transparent)]
     Companion(#[from] CompanionError),
+    /// GraphiteSQL failed while opening the database.
     #[error("GraphiteSQL failed to open the database: {source}")]
     Open {
+        /// Original GraphiteSQL error.
         #[source]
         source: Box<dyn StdError + Send + Sync>,
     },
+    /// GraphiteSQL failed while executing a query.
     #[error("GraphiteSQL query failed: {source}")]
     Query {
+        /// Original GraphiteSQL error.
         #[source]
         source: Box<dyn StdError + Send + Sync>,
     },
 }
 
+/// Materialized result returned by a read-only GraphiteSQL query.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryResult {
+    /// Column names in result order.
     pub columns: Vec<String>,
+    /// Result rows, each containing one [`Value`] per column.
     pub rows: Vec<Vec<Value>>,
 }
 
+/// SQLite value returned by GraphiteSQL.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
+    /// SQL `NULL`.
     Null,
+    /// Signed 64-bit integer.
     Integer(i64),
+    /// IEEE 754 double-precision value.
     Real(f64),
+    /// Text bytes as returned by GraphiteSQL.
     Text(Vec<u8>),
+    /// Arbitrary blob bytes.
     Blob(Vec<u8>),
 }
 
+/// Open read-only GraphiteSQL connection backed by authenticated page reads.
 pub struct ReadOnlyConnection {
     inner: GraphiteConnection,
 }
 
 impl ReadOnlyConnection {
+    /// Executes a read-only SQL statement and materializes its result.
     pub fn query(&self, sql: &str) -> Result<QueryResult, GraphiteAdapterError> {
         self.inner
             .query(sql)
@@ -171,6 +192,11 @@ impl Vfs for SqlCipherVfs {
     }
 }
 
+/// Opens an immutable encrypted main database through a read-only GraphiteSQL VFS.
+///
+/// The path must be valid UTF-8, and sibling `-wal` and `-journal` files are
+/// rejected before the main database is opened. The caller must ensure the
+/// source remains unchanged for the connection's lifetime.
 pub fn open_readonly(
     path: impl AsRef<Path>,
     config: CipherConfig,
