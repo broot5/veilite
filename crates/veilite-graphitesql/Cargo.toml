@@ -2,6 +2,13 @@
 name = "veilite-graphitesql"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+description = "GraphiteSQL adapter for SQLCipher database snapshots"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords = ["sqlcipher", "sqlite", "graphitesql"]
+categories = ["database"]
 
 [dependencies]
 graphitesql.workspace = true

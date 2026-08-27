@@ -2,6 +2,13 @@
 name = "veilite-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+description = "Authenticated SQLCipher database snapshot reader"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords = ["sqlcipher", "sqlite"]
+categories = ["cryptography", "database"]
 
 [dependencies]
 aes.workspace = true
