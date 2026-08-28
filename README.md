@@ -1,33 +1,43 @@
 # Veilite
 
-Veilite is a pure Rust library and CLI for reading immutable
-SQLCipher database snapshots. It authenticates and decrypts pages, exports
-plaintext SQLite images, and runs read-only queries through
-[GraphiteSQL](https://github.com/KarpelesLab/graphitesql).
+Veilite provides libraries and a CLI for reading immutable SQLCipher database
+snapshots.
+
+All components are implemented in Rust without C SQLCipher, C SQLite, or
+OpenSSL. Rust 1.89 or newer is required.
+
+## Components
+
+- `veilite-core` provides authenticated random-access page reads and
+  AES-256-CBC decryption.
+- `veilite-graphitesql` runs read-only SQL queries through
+  [GraphiteSQL](https://github.com/KarpelesLab/graphitesql).
+- `veilite` is the command-line interface for inspecting, verifying, exporting,
+  and querying snapshots.
 
 ## Compatibility
 
-Veilite supports the default SQLCipher 3 and 4 profiles, along with custom
-page size, KDF, and page HMAC settings. Profiles must be selected explicitly;
-they are not auto-detected.
+Veilite supports the default SQLCipher 3 and 4 profiles. Custom configurations
+can select the page size, KDF iteration count, PBKDF2-HMAC algorithm, and page
+HMAC algorithm. The profile or complete custom configuration must be supplied
+explicitly; it is not auto-detected.
 
 Input must be an immutable main database snapshot created after all transactions
 have completed and the originating application has checkpointed and cleanly
 closed the database. Removing existing `-wal` or `-journal` files does not
 produce a valid snapshot.
 
-Live databases, writes, database creation, rekeying, SQLCipher 1 or 2 presets,
-raw keys, disabled page HMACs, and plaintext headers are not supported.
+Live databases, writes to encrypted databases, database creation, rekeying,
+SQLCipher 1 or 2 presets, raw keys, disabled page HMACs, and plaintext headers
+are not supported.
 
-## Install
+## CLI
 
 ```console
 git clone https://github.com/broot5/veilite.git
 cd veilite
 cargo install --locked --path crates/veilite-cli
 ```
-
-## CLI
 
 Choose a preset with `--preset 3` or `--preset 4`:
 
@@ -45,17 +55,28 @@ veilite export --preset 4 encrypted.db plaintext.db
 veilite query --preset 4 encrypted.db 'SELECT id, title FROM notes ORDER BY id'
 ```
 
-Use `--custom` with a page size, KDF iteration count, KDF algorithm, and HMAC
-algorithm to supply a complete custom configuration.
+For a custom configuration, supply all four cipher parameters explicitly:
 
-`verify`, `export`, and `query` prompt for a passphrase unless
-`--passphrase-file` is provided. Run `veilite help` or
-`veilite <command> --help` for the full CLI reference.
+```console
+veilite verify --custom \
+  --page-size 2048 \
+  --kdf-iterations 100000 \
+  --kdf-algorithm sha256 \
+  --hmac-algorithm sha256 \
+  encrypted.db
+```
 
-## Library
+`verify`, `export`, and `query` prompt for a passphrase. Use
+`--passphrase-file FILE` to read it from the first line of a file. `inspect`
+reports sibling `-wal` and `-journal` files; the other commands reject them.
 
-Use `veilite-core` for authenticated page access and `veilite-graphitesql` for
-read-only SQL queries:
+`export` does not overwrite an existing destination. Query output is
+human-readable and is not a stable machine-readable format. Run `veilite help`
+or `veilite <command> --help` for the full CLI reference.
+
+## Libraries
+
+### `veilite-core`
 
 ```rust
 use std::num::NonZeroU32;
@@ -67,7 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reader = SqlCipherReader::open(source, config, b"example passphrase")?;
     let mut page = vec![0; reader.page_size()];
 
-    reader.read_page_into(NonZeroU32::new(1).unwrap(), &mut page)?;
+    reader.read_page_into(NonZeroU32::MIN, &mut page)?;
     Ok(())
 }
 ```
@@ -75,6 +96,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Opening a reader derives keys but does not authenticate the entire database.
 Pages are authenticated as they are read; use `veilite verify` for a full
 check.
+
+### `veilite-graphitesql`
+
+```rust
+use veilite_core::CipherPreset;
+use veilite_graphitesql::open_readonly;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let connection = open_readonly(
+        "encrypted.db",
+        CipherPreset::SqlCipher4.into(),
+        b"example passphrase",
+    )?;
+    let result = connection.query("SELECT id, title FROM notes ORDER BY id")?;
+
+    println!("{result:#?}");
+    Ok(())
+}
+```
+
+The adapter rejects writes and sibling `-wal` or `-journal` files.
 
 ## License
 
