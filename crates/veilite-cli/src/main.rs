@@ -296,17 +296,18 @@ fn export(args: ExportArgs) -> Result<(), Box<dyn Error>> {
     let config = args.cipher.config()?;
     check_companion_files(&args.input_path)?;
     let passphrase = read_passphrase(&args.passphrase)?;
-    let source = FileSource::open(&args.input_path)?;
+    let source = open_encrypted_database(&args.input_path)?;
     let reader = SqlCipherReader::open(source, config, passphrase.as_slice())?;
     drop(passphrase);
 
     write_decrypted_database(&args.output_path, &reader)?;
 
-    println!(
+    writeln!(
+        io::stdout().lock(),
         "decrypted {} pages to {}",
         reader.page_count(),
         args.output_path.display()
-    );
+    )?;
     Ok(())
 }
 
@@ -319,29 +320,62 @@ fn write_decrypted_database(
     #[cfg(unix)]
     options.mode(0o600);
 
-    let mut file = options.open(path)?;
+    let mut file = options
+        .open(path)
+        .map_err(|source| path_io_error("failed to create export", path, source))?;
     let result = (|| -> Result<(), Box<dyn Error>> {
         let mut plaintext_page = Zeroizing::new(vec![0; reader.page_size()]);
         for page_no in 1..=reader.page_count() {
             let page_no = nonzero_page_number(page_no)?;
             reader.read_page_into(page_no, &mut plaintext_page)?;
-            file.write_all(&plaintext_page)?;
+            file.write_all(&plaintext_page)
+                .map_err(|source| path_io_error("failed to write export", path, source))?;
         }
-        file.sync_all()?;
+        file.sync_all()
+            .map_err(|source| path_io_error("failed to sync export", path, source))?;
         Ok(())
     })();
 
     if let Err(error) = result {
         drop(file);
-        let _ = fs::remove_file(path);
-        return Err(error);
+        return Err(cleanup_failed_export(path, error));
     }
     Ok(())
 }
 
+fn cleanup_failed_export(path: &Path, export_error: Box<dyn Error>) -> Box<dyn Error> {
+    match fs::remove_file(path) {
+        Ok(()) => export_error,
+        Err(cleanup_error) if cleanup_error.kind() == io::ErrorKind::NotFound => export_error,
+        Err(cleanup_error) => io::Error::new(
+            cleanup_error.kind(),
+            format!(
+                "export failed: {export_error}; failed to remove partial plaintext file {path:?}: \
+                 {cleanup_error}; the file may contain decrypted data"
+            ),
+        )
+        .into(),
+    }
+}
+
+fn path_io_error(action: &str, path: &Path, source: io::Error) -> io::Error {
+    io::Error::new(source.kind(), format!("{action} {path:?}: {source}"))
+}
+
+fn open_encrypted_database(path: &Path) -> io::Result<FileSource> {
+    FileSource::open(path)
+        .map_err(|source| path_io_error("failed to open encrypted database", path, source))
+}
+
 fn inspect(args: InspectArgs) -> Result<(), Box<dyn Error>> {
     let config = args.cipher.config()?;
-    let metadata = fs::metadata(&args.input_path)?;
+    let metadata = fs::metadata(&args.input_path).map_err(|source| {
+        path_io_error(
+            "failed to inspect encrypted database",
+            &args.input_path,
+            source,
+        )
+    })?;
     if !metadata.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -356,30 +390,34 @@ fn inspect(args: InspectArgs) -> Result<(), Box<dyn Error>> {
 
     let wal_path = companion_path(&args.input_path, "-wal");
     let journal_path = companion_path(&args.input_path, "-journal");
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
 
-    println!("path: {}", args.input_path.display());
+    writeln!(output, "path: {}", args.input_path.display())?;
     match args.cipher.preset {
         Some(preset) => {
-            println!("configuration: preset");
-            println!("preset: {}", preset.number());
+            writeln!(output, "configuration: preset")?;
+            writeln!(output, "preset: {}", preset.number())?;
         }
-        None => println!("configuration: custom"),
+        None => writeln!(output, "configuration: custom")?,
     }
-    println!("file size: {file_size} bytes");
-    println!("page size: {page_size} bytes");
-    println!("KDF iterations: {}", config.kdf_iterations());
-    println!(
+    writeln!(output, "file size: {file_size} bytes")?;
+    writeln!(output, "page size: {page_size} bytes")?;
+    writeln!(output, "KDF iterations: {}", config.kdf_iterations())?;
+    writeln!(
+        output,
         "KDF algorithm: {}",
         hash_algorithm_name(config.kdf_algorithm())
-    );
-    println!(
+    )?;
+    writeln!(
+        output,
         "HMAC algorithm: {}",
         hash_algorithm_name(config.hmac_algorithm())
-    );
-    println!("reserve size: {} bytes", config.reserve_size());
-    println!("page count: {}", file_size / page_size);
-    println!("WAL: {}", presence(&wal_path)?);
-    println!("journal: {}", presence(&journal_path)?);
+    )?;
+    writeln!(output, "reserve size: {} bytes", config.reserve_size())?;
+    writeln!(output, "page count: {}", file_size / page_size)?;
+    writeln!(output, "WAL: {}", presence(&wal_path)?)?;
+    writeln!(output, "journal: {}", presence(&journal_path)?)?;
     Ok(())
 }
 
@@ -400,7 +438,7 @@ fn verify(args: VerifyArgs) -> Result<(), Box<dyn Error>> {
     let config = args.cipher.config()?;
     check_companion_files(&args.input_path)?;
     let passphrase = read_passphrase(&args.passphrase)?;
-    let source = FileSource::open(&args.input_path)?;
+    let source = open_encrypted_database(&args.input_path)?;
     let reader = SqlCipherReader::open(source, config, passphrase.as_slice())?;
     drop(passphrase);
     let mut plaintext_page = Zeroizing::new(vec![0; reader.page_size()]);
@@ -410,7 +448,11 @@ fn verify(args: VerifyArgs) -> Result<(), Box<dyn Error>> {
         reader.read_page_into(page_no, &mut plaintext_page)?;
     }
 
-    println!("verified {} pages", reader.page_count());
+    writeln!(
+        io::stdout().lock(),
+        "verified {} pages",
+        reader.page_count()
+    )?;
     Ok(())
 }
 
@@ -437,15 +479,8 @@ fn read_passphrase(args: &PassphraseArgs) -> io::Result<Zeroizing<Vec<u8>>> {
 }
 
 fn read_passphrase_file(path: &Path) -> io::Result<Zeroizing<Vec<u8>>> {
-    let bytes = fs::read(path).map_err(|source| {
-        io::Error::new(
-            source.kind(),
-            format!(
-                "failed to read passphrase file {}: {source}",
-                path.display()
-            ),
-        )
-    })?;
+    let bytes = fs::read(path)
+        .map_err(|source| path_io_error("failed to read passphrase file", path, source))?;
     let mut passphrase = Zeroizing::new(bytes);
 
     truncate_to_first_line(&mut passphrase);
@@ -471,6 +506,7 @@ fn companion_path(path: &Path, suffix: &str) -> PathBuf {
 
 fn presence(path: &Path) -> io::Result<&'static str> {
     path.try_exists()
+        .map_err(|source| path_io_error("failed to inspect companion file", path, source))
         .map(|exists| if exists { "present" } else { "absent" })
 }
 
@@ -517,9 +553,18 @@ fn write_value(value: &Value, output: &mut dyn Write) -> io::Result<()> {
 
 fn main() {
     if let Err(error) = run() {
+        if is_broken_pipe(error.as_ref()) {
+            return;
+        }
         eprintln!("error: {error}");
         std::process::exit(1);
     }
+}
+
+fn is_broken_pipe(error: &(dyn Error + 'static)) -> bool {
+    error
+        .downcast_ref::<io::Error>()
+        .is_some_and(|error| error.kind() == io::ErrorKind::BrokenPipe)
 }
 
 #[cfg(test)]
@@ -738,11 +783,39 @@ mod tests {
         )
         .unwrap();
 
-        assert!(write_decrypted_database(&existing_output_path, &reader).is_err());
+        let error = write_decrypted_database(&existing_output_path, &reader).unwrap_err();
+        assert!(error.to_string().contains("failed to create export"));
+        assert!(error.to_string().contains("existing.db"));
         assert_eq!(fs::read(&existing_output_path).unwrap(), b"keep this");
 
         assert!(write_decrypted_database(&partial_output_path, &reader).is_err());
         assert!(!partial_output_path.exists());
+    }
+
+    #[test]
+    fn reports_when_a_partial_export_cannot_be_removed() {
+        let directory = TemporaryDirectory::new();
+        let residual_path = directory.path().join("partial.db");
+        fs::create_dir(&residual_path).unwrap();
+        let export_error: Box<dyn Error> =
+            io::Error::new(io::ErrorKind::InvalidData, "page authentication failed").into();
+
+        let error = cleanup_failed_export(&residual_path, export_error);
+        let message = error.to_string();
+
+        assert!(residual_path.is_dir());
+        assert!(message.contains("page authentication failed"));
+        assert!(message.contains("partial.db"));
+        assert!(message.contains("the file may contain decrypted data"));
+    }
+
+    #[test]
+    fn identifies_broken_pipe_errors() {
+        let broken_pipe = io::Error::new(io::ErrorKind::BrokenPipe, "downstream closed");
+        let other = io::Error::other("different failure");
+
+        assert!(is_broken_pipe(&broken_pipe));
+        assert!(!is_broken_pipe(&other));
     }
 
     static NEXT_TEMPORARY_DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
