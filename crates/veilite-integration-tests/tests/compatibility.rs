@@ -377,3 +377,126 @@ fn queries_supported_fixtures_and_rejects_writes() {
         assert!(matches!(error, GraphiteAdapterError::Query { .. }));
     }
 }
+
+#[test]
+fn queries_relational_operations_across_supported_fixtures() {
+    use Value::{Integer, Null, Real, Text};
+
+    // Expected columns, values and types were checked against SQLCipher 4.18.0.
+    // Keep this regression independent of an installed SQLCipher executable.
+    let queries = [
+        (
+            "inner join with filtering",
+            "SELECT p.id AS person_id, p.name AS name, a.action AS action \
+             FROM people AS p JOIN audit_log AS a ON a.person_id = p.id \
+             WHERE p.active = 1 ORDER BY p.id",
+            vec!["person_id", "name", "action"],
+            vec![
+                vec![
+                    Integer(1),
+                    Text(b"Alice".to_vec()),
+                    Text(b"insert".to_vec()),
+                ],
+                vec![
+                    Integer(2),
+                    Text("홍길동".as_bytes().to_vec()),
+                    Text(b"insert".to_vec()),
+                ],
+            ],
+        ),
+        (
+            "left join preserves an unmatched row",
+            "SELECT p.id AS person_id, a.action AS action \
+             FROM people AS p LEFT JOIN audit_log AS a \
+             ON a.person_id = p.id AND p.active = 1 ORDER BY p.id",
+            vec!["person_id", "action"],
+            vec![
+                vec![Integer(1), Text(b"insert".to_vec())],
+                vec![Integer(2), Text(b"insert".to_vec())],
+                vec![Integer(3), Null],
+            ],
+        ),
+        (
+            "grouped aggregates distinguish NULL from a value",
+            "SELECT active, COUNT(*) AS total, COUNT(note) AS notes, \
+             SUM(score) AS score_sum FROM people \
+             GROUP BY active HAVING COUNT(*) >= 1 ORDER BY active",
+            vec!["active", "total", "notes", "score_sum"],
+            vec![
+                vec![Integer(0), Integer(1), Integer(0), Real(0.0)],
+                vec![Integer(1), Integer(2), Integer(2), Real(86.25)],
+            ],
+        ),
+        (
+            "having filters groups",
+            "SELECT active, COUNT(*) AS total FROM people \
+             GROUP BY active HAVING COUNT(*) > 1 ORDER BY active",
+            vec!["active", "total"],
+            vec![vec![Integer(1), Integer(2)]],
+        ),
+        (
+            "empty aggregates preserve SQLite NULL semantics",
+            "SELECT COUNT(*) AS total, SUM(score) AS score_sum, AVG(score) AS score_avg \
+             FROM people WHERE id < 0",
+            vec!["total", "score_sum", "score_avg"],
+            vec![vec![Integer(0), Null, Null]],
+        ),
+        (
+            "scalar subquery",
+            "SELECT id, name FROM people \
+             WHERE score > (SELECT AVG(score) FROM people) ORDER BY id",
+            vec!["id", "name"],
+            vec![vec![Integer(1), Text(b"Alice".to_vec())]],
+        ),
+        (
+            "IN subquery",
+            "SELECT id, name FROM people WHERE id IN \
+             (SELECT person_id FROM audit_log WHERE person_id >= 2) ORDER BY id",
+            vec!["id", "name"],
+            vec![
+                vec![Integer(2), Text("홍길동".as_bytes().to_vec())],
+                vec![Integer(3), Text(b"Null Tester".to_vec())],
+            ],
+        ),
+        (
+            "correlated EXISTS subquery",
+            "SELECT p.id AS person_id FROM people AS p WHERE EXISTS \
+             (SELECT 1 FROM audit_log AS a WHERE a.person_id = p.id AND a.person_id >= 2) \
+             ORDER BY p.id",
+            vec!["person_id"],
+            vec![vec![Integer(2)], vec![Integer(3)]],
+        ),
+        (
+            "view with an additional predicate",
+            "SELECT id, name, score FROM active_people WHERE score >= 0 ORDER BY id",
+            vec!["id", "name", "score"],
+            vec![vec![Integer(1), Text(b"Alice".to_vec()), Real(98.5)]],
+        ),
+        (
+            "equality on an indexed text column",
+            "SELECT id, name FROM people WHERE name = '홍길동' ORDER BY id",
+            vec!["id", "name"],
+            vec![vec![Integer(2), Text("홍길동".as_bytes().to_vec())]],
+        ),
+        (
+            "empty indexed lookup retains column names",
+            "SELECT id, name FROM people WHERE name = 'missing' ORDER BY id",
+            vec!["id", "name"],
+            vec![],
+        ),
+    ];
+
+    for case in FIXTURE_CASES {
+        let connection = open_readonly(case.path(), case.config(), case.passphrase)
+            .unwrap_or_else(|error| panic!("{} failed to open: {error}", case.name));
+
+        for (name, sql, columns, rows) in &queries {
+            let result = connection
+                .query(sql)
+                .unwrap_or_else(|error| panic!("{} {name}: {error}", case.name));
+
+            assert_eq!(&result.columns, columns, "{} {name} columns", case.name);
+            assert_eq!(&result.rows, rows, "{} {name} rows", case.name);
+        }
+    }
+}
