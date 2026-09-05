@@ -162,9 +162,6 @@ impl Vfs for SqlCipherVfs {
             return Err(GraphiteError::CantOpen(path.to_owned()));
         }
 
-        // Callers may invoke `Vfs::open` directly without going through
-        // `open_readonly`, so check for companion files before opening the main
-        // database.
         check_companion_files(&self.main_path).map_err(map_companion_to_graphite)?;
         let source = FileSource::open(&self.main_path).map_err(|error| match error.kind() {
             io::ErrorKind::NotFound => GraphiteError::CantOpen(path.to_owned()),
