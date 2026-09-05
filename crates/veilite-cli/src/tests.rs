@@ -147,16 +147,63 @@ fn validates_inspect_file_sizes() {
 
 #[test]
 fn keeps_only_the_first_passphrase_file_line() {
-    for (mut contents, expected) in [
+    for (contents, expected) in [
         (b"passphrase".to_vec(), b"passphrase".as_slice()),
         (b"passphrase\nignored".to_vec(), b"passphrase".as_slice()),
         (b"passphrase\r\nignored".to_vec(), b"passphrase".as_slice()),
+        (b"passphrase\r".to_vec(), b"passphrase".as_slice()),
+        (
+            b"\xff\0 \rinside\nignored".to_vec(),
+            b"\xff\0 \rinside".as_slice(),
+        ),
+        (b"\nignored".to_vec(), b"".as_slice()),
         (Vec::new(), b"".as_slice()),
     ] {
-        truncate_to_first_line(&mut contents);
+        let directory = TemporaryDirectory::new();
+        let path = directory.path().join("passphrase");
+        fs::write(&path, contents).unwrap();
+        let passphrase = read_passphrase_file(&path).unwrap();
 
-        assert_eq!(contents, expected);
+        assert_eq!(passphrase.as_slice(), expected);
     }
+}
+
+#[test]
+fn reads_long_passphrases_across_buffer_boundaries() {
+    for length in [4095, 4096, 4097, 8192] {
+        let expected = vec![b'x'; length];
+        let mut contents = expected.clone();
+        contents.extend_from_slice(b"\r\nignored");
+        let passphrase = read_passphrase_line(contents.as_slice()).unwrap();
+        assert_eq!(passphrase.as_slice(), expected);
+    }
+}
+
+#[test]
+fn stops_reading_after_first_line_and_propagates_earlier_errors() {
+    struct FailingTail {
+        first: Option<&'static [u8]>,
+    }
+
+    impl Read for FailingTail {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            match self.first.take() {
+                Some(mut bytes) => bytes.read(output),
+                None => Err(io::Error::other("tail must not be read")),
+            }
+        }
+    }
+
+    let passphrase = read_passphrase_line(FailingTail {
+        first: Some(b"secret\n"),
+    })
+    .unwrap();
+    assert_eq!(passphrase.as_slice(), b"secret");
+    let error = read_passphrase_line(FailingTail {
+        first: Some(b"unfinished"),
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::Other);
 }
 
 #[test]

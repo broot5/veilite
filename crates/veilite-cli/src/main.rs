@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
@@ -479,23 +479,38 @@ fn read_passphrase(args: &PassphraseArgs) -> io::Result<Zeroizing<Vec<u8>>> {
 }
 
 fn read_passphrase_file(path: &Path) -> io::Result<Zeroizing<Vec<u8>>> {
-    let bytes = fs::read(path)
-        .map_err(|source| path_io_error("failed to read passphrase file", path, source))?;
-    let mut passphrase = Zeroizing::new(bytes);
-
-    truncate_to_first_line(&mut passphrase);
-
-    Ok(passphrase)
+    let read = || {
+        let file = fs::File::open(path)?;
+        read_passphrase_line(file)
+    };
+    read().map_err(|source| path_io_error("failed to read passphrase file", path, source))
 }
 
-fn truncate_to_first_line(passphrase: &mut Vec<u8>) {
-    if let Some(line_end) = passphrase.iter().position(|byte| *byte == b'\n') {
-        passphrase[line_end..].zeroize();
-        passphrase.truncate(line_end);
+fn read_passphrase_line(mut input: impl Read) -> io::Result<Zeroizing<Vec<u8>>> {
+    let mut passphrase = Zeroizing::new(Vec::new());
+    let mut buffer = Zeroizing::new([0; 4096]);
+    loop {
+        let count = match input.read(buffer.as_mut()) {
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if count == 0 {
+            break;
+        }
+        if let Some(line_end) = buffer[..count].iter().position(|byte| *byte == b'\n') {
+            passphrase.extend_from_slice(&buffer[..line_end]);
+            break;
+        }
+        passphrase.extend_from_slice(&buffer[..count]);
     }
-    if passphrase.last() == Some(&b'\r') {
+    if let Some(last) = passphrase.last_mut()
+        && *last == b'\r'
+    {
+        last.zeroize();
         passphrase.pop();
     }
+    Ok(passphrase)
 }
 
 fn companion_path(path: &Path, suffix: &str) -> PathBuf {
