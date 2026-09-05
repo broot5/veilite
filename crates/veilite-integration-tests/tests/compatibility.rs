@@ -166,6 +166,10 @@ fn reads_matching_ranges_from_slice_and_file_sources() {
             expected.extend_from_slice(&page);
         }
         let ranges = [
+            (0, case.page_size),
+            (case.page_size, case.page_size),
+            (case.encrypted.len() - case.page_size, case.page_size),
+            (1, case.page_size),
             (0, 100),
             (case.page_size / 2, 200),
             (case.page_size - 31, 97),
@@ -232,9 +236,7 @@ fn rejects_page_tampering_and_relocation_without_exposing_plaintext() {
                     .unwrap();
             let mut output = vec![0xaa; case.page_size];
 
-            let error = reader
-                .read_page_into(NonZeroU32::new(1).unwrap(), &mut output)
-                .unwrap_err();
+            let error = reader.read_exact_at(0, &mut output).unwrap_err();
 
             assert!(matches!(
                 error,
@@ -252,7 +254,7 @@ fn rejects_page_tampering_and_relocation_without_exposing_plaintext() {
         let mut output = vec![0xaa; case.page_size];
 
         let error = reader
-            .read_page_into(NonZeroU32::new(3).unwrap(), &mut output)
+            .read_exact_at(u64::try_from(2 * case.page_size).unwrap(), &mut output)
             .unwrap_err();
 
         assert!(matches!(

@@ -253,6 +253,19 @@ impl<R: ReadAt> SqlCipherReader<R> {
 
         let page_size = self.page_size();
         let page_size_u64 = page_size as u64;
+        // A complete aligned page can be authenticated and decrypted directly
+        // into the caller's buffer, without allocating or copying a scratch page.
+        if output.len() == page_size && offset.is_multiple_of(page_size_u64) {
+            let page_number = (offset / page_size_u64)
+                .checked_add(1)
+                .and_then(|number| u32::try_from(number).ok())
+                .and_then(NonZeroU32::new)
+                .ok_or(ReaderError::OffsetOverflow {
+                    offset,
+                    length: output.len(),
+                })?;
+            return self.read_page_into(page_number, output);
+        }
         let mut plaintext_page = Zeroizing::new(vec![0; page_size]);
         let mut database_offset = offset;
         let mut output_offset = 0;

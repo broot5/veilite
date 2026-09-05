@@ -129,6 +129,13 @@ fn rejects_out_of_range_pages_and_reads() {
         ));
         assert!(page.iter().all(|byte| *byte == 0));
 
+        page.fill(0xaa);
+        let error = reader
+            .read_exact_at(reader.file_size(), &mut page)
+            .unwrap_err();
+        assert!(matches!(error, ReaderError::UnexpectedEof { .. }));
+        assert!(page.iter().all(|byte| *byte == 0));
+
         let mut output = [0xaa; 2];
         let error = reader
             .read_exact_at(reader.file_size() - 1, &mut output)
@@ -185,4 +192,27 @@ fn rejects_short_source_reads_and_clears_output() {
             if source_error.kind() == io::ErrorKind::UnexpectedEof
     ));
     assert!(output.iter().all(|byte| *byte == 0));
+}
+
+#[test]
+fn aligned_range_clears_partial_source_output() {
+    for preset in [CipherPreset::SqlCipher3, CipherPreset::SqlCipher4] {
+        let config = CipherConfig::from(preset);
+        let reader = SqlCipherReader::open(
+            PartialReadSource {
+                page_size: config.page_size(),
+            },
+            config,
+            b"passphrase",
+        )
+        .unwrap();
+        let mut output = vec![0xaa; reader.page_size()];
+        let error = reader
+            .read_exact_at(reader.page_size() as u64, &mut output)
+            .unwrap_err();
+        assert!(
+            matches!(error, ReaderError::Source(error) if error.kind() == io::ErrorKind::UnexpectedEof)
+        );
+        assert!(output.iter().all(|byte| *byte == 0));
+    }
 }
