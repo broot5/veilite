@@ -212,9 +212,6 @@ impl PageDecryptor {
                     .chain_update(page_number.to_le_bytes());
 
                 mac.verify_slice(stored_hmac)
-                    .map_err(|_| DecryptError::AuthenticationFailed {
-                        page_no: page_number,
-                    })
             }
             HashAlgorithm::Sha256 => {
                 let mac = hmac::Hmac::<Sha256>::new_from_slice(&self.keys.hmac_key)
@@ -224,9 +221,6 @@ impl PageDecryptor {
                     .chain_update(page_number.to_le_bytes());
 
                 mac.verify_slice(stored_hmac)
-                    .map_err(|_| DecryptError::AuthenticationFailed {
-                        page_no: page_number,
-                    })
             }
             HashAlgorithm::Sha512 => {
                 let mac = hmac::Hmac::<Sha512>::new_from_slice(&self.keys.hmac_key)
@@ -236,11 +230,11 @@ impl PageDecryptor {
                     .chain_update(page_number.to_le_bytes());
 
                 mac.verify_slice(stored_hmac)
-                    .map_err(|_| DecryptError::AuthenticationFailed {
-                        page_no: page_number,
-                    })
             }
         }
+        .map_err(|_| DecryptError::AuthenticationFailed {
+            page_no: page_number,
+        })
     }
 }
 

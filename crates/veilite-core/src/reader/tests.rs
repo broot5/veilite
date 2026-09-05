@@ -144,29 +144,33 @@ fn rejects_out_of_range_pages_and_reads() {
     }
 }
 
-struct MisreportedLengthSource {
-    bytes: Vec<u8>,
-    reported_length: u64,
+struct PartialReadSource {
+    page_size: usize,
 }
 
-impl ReadAt for MisreportedLengthSource {
+impl ReadAt for PartialReadSource {
     type Error = io::Error;
 
     fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> io::Result<()> {
-        SliceSource::new(&self.bytes).read_exact_at(offset, output)
+        if offset == 0 && output.len() == 16 {
+            output.fill(0x42);
+            return Ok(());
+        }
+        let partial_length = output.len() / 2;
+        output[..partial_length].fill(0x5a);
+        Err(io::Error::new(io::ErrorKind::UnexpectedEof, "partial read"))
     }
 
     fn len(&self) -> io::Result<u64> {
-        Ok(self.reported_length)
+        Ok((self.page_size * 2) as u64)
     }
 }
 
 #[test]
 fn rejects_short_source_reads_and_clears_output() {
     let config = CipherConfig::from(CipherPreset::SqlCipher4);
-    let source = MisreportedLengthSource {
-        bytes: vec![0; config.page_size() * 2 - 1],
-        reported_length: u64::try_from(config.page_size() * 2).unwrap(),
+    let source = PartialReadSource {
+        page_size: config.page_size(),
     };
     let reader = SqlCipherReader::open(source, config, b"passphrase").unwrap();
     let mut output = vec![0xaa; reader.page_size()];

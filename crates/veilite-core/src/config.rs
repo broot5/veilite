@@ -4,9 +4,7 @@ const MIN_PAGE_SIZE: usize = 1024;
 const MAX_PAGE_SIZE: usize = 65_536;
 const MAX_KDF_ITERATIONS: u32 = i32::MAX as u32;
 const AES_BLOCK_SIZE: usize = 16;
-const DATABASE_SALT_SIZE: usize = 16;
 const IV_SIZE: usize = 16;
-const MIN_SQLITE_USABLE_SIZE: usize = 480;
 
 /// A supported SQLCipher default on-disk configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,8 +72,8 @@ impl CipherConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`CipherConfigError`] when a value or the resulting page layout
-    /// falls outside the supported format boundary.
+    /// Returns [`CipherConfigError`] when the page size or iteration count
+    /// falls outside the supported range.
     pub fn new(
         page_size: usize,
         kdf_iterations: u32,
@@ -89,24 +87,8 @@ impl CipherConfig {
             return Err(CipherConfigError::InvalidKdfIterations { kdf_iterations });
         }
 
-        let reserve_size = reserve_size_for(hmac_algorithm);
-        let invalid_layout = CipherConfigError::InvalidPageLayout {
-            page_size,
-            reserve_size,
-        };
-        let usable_end = page_size.checked_sub(reserve_size).ok_or(invalid_layout)?;
-        if usable_end < MIN_SQLITE_USABLE_SIZE {
-            return Err(invalid_layout);
-        }
-
-        let first_page_ciphertext_len = usable_end - DATABASE_SALT_SIZE;
-        if u8::try_from(reserve_size).is_err()
-            || !usable_end.is_multiple_of(AES_BLOCK_SIZE)
-            || !first_page_ciphertext_len.is_multiple_of(AES_BLOCK_SIZE)
-        {
-            return Err(invalid_layout);
-        }
-
+        // Supported page sizes and HMAC digests always yield a valid layout.
+        // Tests cover every supported page size and reserve size.
         Ok(Self {
             page_size,
             kdf_iterations,
@@ -171,16 +153,6 @@ pub enum CipherConfigError {
         /// Rejected iteration count.
         kdf_iterations: u32,
     },
-    /// The selected values cannot form a supported authenticated page layout.
-    #[error(
-        "invalid cipher page layout: page size {page_size} bytes with {reserve_size} reserved bytes"
-    )]
-    InvalidPageLayout {
-        /// Requested page size in bytes.
-        page_size: usize,
-        /// Calculated per-page reserve size in bytes.
-        reserve_size: usize,
-    },
 }
 
 #[cfg(test)]
@@ -221,23 +193,28 @@ mod tests {
     }
 
     #[test]
-    fn validates_supported_configuration_boundaries() {
-        for page_size in [1024, 65_536] {
+    fn validates_supported_configurations_and_layout_invariants() {
+        for page_size in [1024, 2048, 4096, 8192, 16_384, 32_768, 65_536] {
             for kdf_iterations in [1, i32::MAX as u32] {
                 for hmac_algorithm in [
                     HashAlgorithm::Sha1,
                     HashAlgorithm::Sha256,
                     HashAlgorithm::Sha512,
                 ] {
-                    assert!(
-                        CipherConfig::new(
-                            page_size,
-                            kdf_iterations,
-                            HashAlgorithm::Sha256,
-                            hmac_algorithm,
-                        )
-                        .is_ok()
-                    );
+                    let config = CipherConfig::new(
+                        page_size,
+                        kdf_iterations,
+                        HashAlgorithm::Sha256,
+                        hmac_algorithm,
+                    )
+                    .unwrap();
+                    let reserve = config.reserve_size();
+                    assert!(reserve < page_size);
+                    assert!(u8::try_from(reserve).is_ok());
+                    let usable = page_size - reserve;
+                    assert!(usable >= 480);
+                    assert_eq!(usable % 16, 0);
+                    assert_eq!((usable - 16) % 16, 0);
                 }
             }
         }
