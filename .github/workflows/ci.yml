@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install rustfmt
+        run: rustup toolchain install stable --profile minimal --component rustfmt
+      - name: Check formatting
+        run: cargo +stable fmt --all -- --check
+
+  check:
+    name: Rust ${{ matrix.toolchain }} / ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            toolchain: stable
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            toolchain: stable
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            toolchain: 1.89.0
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target "$CARGO_BUILD_TARGET"
+      - name: Install Clippy
+        if: matrix.toolchain == 'stable'
+        run: rustup component add clippy
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-${{ matrix.toolchain }}
+      - name: Build
+        run: cargo build --workspace --locked
+      - name: Test
+        run: cargo test --workspace --all-targets --locked
+      - name: Clippy
+        if: matrix.toolchain == 'stable'
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Check documentation
+        if: matrix.toolchain == 'stable' && matrix.runner == 'ubuntu-24.04'
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
