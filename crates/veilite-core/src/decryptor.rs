@@ -23,7 +23,7 @@ struct KeyMaterial {
 ///
 /// Most callers should use [`crate::SqlCipherReader`], which validates source
 /// length and page numbers before invoking the decryptor.
-pub struct PageDecryptor {
+pub(super) struct PageDecryptor {
     config: CipherConfig,
     keys: KeyMaterial,
 }
@@ -67,7 +67,7 @@ pub enum DecryptError {
 
 impl PageDecryptor {
     /// Derives page encryption and HMAC keys from a passphrase and database salt.
-    pub fn new(
+    pub(super) fn new(
         config: CipherConfig,
         passphrase: &[u8],
         salt: &[u8; 16],
@@ -105,14 +105,14 @@ impl PageDecryptor {
 
     /// Returns the configured physical page size in bytes.
     #[must_use]
-    pub const fn page_size(&self) -> usize {
+    pub(super) const fn page_size(&self) -> usize {
         self.config.page_size()
     }
 
     /// Authenticates and decrypts one physical page in place.
     ///
     /// The page buffer is cleared if authentication or header validation fails.
-    pub fn decrypt_page_in_place(
+    pub(super) fn decrypt_page_in_place(
         &self,
         page_no: NonZeroU32,
         page: &mut [u8],

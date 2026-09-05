@@ -256,14 +256,12 @@ impl<R: ReadAt> SqlCipherReader<R> {
         // A complete aligned page can be authenticated and decrypted directly
         // into the caller's buffer, without allocating or copying a scratch page.
         if output.len() == page_size && offset.is_multiple_of(page_size_u64) {
-            let page_number = (offset / page_size_u64)
-                .checked_add(1)
-                .and_then(|number| u32::try_from(number).ok())
-                .and_then(NonZeroU32::new)
-                .ok_or(ReaderError::OffsetOverflow {
+            let page_number = page_number_from_index(offset / page_size_u64).ok_or(
+                ReaderError::OffsetOverflow {
                     offset,
                     length: output.len(),
-                })?;
+                },
+            )?;
             return self.read_page_into(page_number, output);
         }
         let mut plaintext_page = Zeroizing::new(vec![0; page_size]);
@@ -272,11 +270,8 @@ impl<R: ReadAt> SqlCipherReader<R> {
 
         while output_offset < output.len() {
             let page_index = database_offset / page_size_u64;
-            let page_number = page_index
-                .checked_add(1)
-                .and_then(|number| u32::try_from(number).ok())
-                .and_then(NonZeroU32::new)
-                .ok_or(ReaderError::OffsetOverflow {
+            let page_number =
+                page_number_from_index(page_index).ok_or(ReaderError::OffsetOverflow {
                     offset,
                     length: output.len(),
                 })?;
@@ -309,6 +304,13 @@ impl<R: ReadAt> SqlCipherReader<R> {
 
         Ok(())
     }
+}
+
+fn page_number_from_index(index: u64) -> Option<NonZeroU32> {
+    index
+        .checked_add(1)
+        .and_then(|number| u32::try_from(number).ok())
+        .and_then(NonZeroU32::new)
 }
 
 #[cfg(test)]
