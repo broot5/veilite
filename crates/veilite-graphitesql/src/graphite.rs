@@ -1,13 +1,9 @@
-use std::error::Error as StdError;
 use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use graphitesql::vfs::{File, OpenFlags, Vfs};
-use graphitesql::{
-    Connection as GraphiteConnection, Error as GraphiteError, QueryResult as GraphiteQueryResult,
-    Value as GraphiteValue,
-};
+use graphitesql::{Connection as GraphiteConnection, Error as GraphiteError};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
@@ -20,7 +16,7 @@ const READ_ONLY_ERROR: &str = "database is read-only";
 const WAL_ERROR: &str = "SQLCipher WAL files are unsupported";
 const JOURNAL_ERROR: &str = "SQLCipher rollback journals are unsupported";
 
-/// Error returned while opening or querying through the GraphiteSQL adapter.
+/// Error returned while opening through the GraphiteSQL adapter.
 #[derive(Debug, Error)]
 pub enum GraphiteAdapterError {
     /// GraphiteSQL cannot represent the database path as UTF-8.
@@ -37,56 +33,8 @@ pub enum GraphiteAdapterError {
     Open {
         /// Original GraphiteSQL error.
         #[source]
-        source: Box<dyn StdError + Send + Sync>,
+        source: GraphiteError,
     },
-    /// GraphiteSQL failed while executing a query.
-    #[error("GraphiteSQL query failed: {source}")]
-    Query {
-        /// Original GraphiteSQL error.
-        #[source]
-        source: Box<dyn StdError + Send + Sync>,
-    },
-}
-
-/// Materialized result returned by a read-only GraphiteSQL query.
-#[derive(Debug, Clone, PartialEq)]
-pub struct QueryResult {
-    /// Column names in result order.
-    pub columns: Vec<String>,
-    /// Result rows, each containing one [`Value`] per column.
-    pub rows: Vec<Vec<Value>>,
-}
-
-/// SQLite value returned by GraphiteSQL.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Value {
-    /// SQL `NULL`.
-    Null,
-    /// Signed 64-bit integer.
-    Integer(i64),
-    /// IEEE 754 double-precision value.
-    Real(f64),
-    /// Text bytes as returned by GraphiteSQL.
-    Text(Vec<u8>),
-    /// Arbitrary blob bytes.
-    Blob(Vec<u8>),
-}
-
-/// Open read-only GraphiteSQL connection backed by authenticated page reads.
-pub struct ReadOnlyConnection {
-    inner: GraphiteConnection,
-}
-
-impl ReadOnlyConnection {
-    /// Executes a read-only SQL statement and materializes its result.
-    pub fn query(&self, sql: &str) -> Result<QueryResult, GraphiteAdapterError> {
-        self.inner
-            .query(sql)
-            .map(convert_query_result)
-            .map_err(|source| GraphiteAdapterError::Query {
-                source: Box::new(source),
-            })
-    }
 }
 
 struct SqlCipherFile {
@@ -189,41 +137,23 @@ impl Vfs for SqlCipherVfs {
 /// The path must be valid UTF-8, and sibling `-wal` and `-journal` files are
 /// rejected before the main database is opened. The caller must ensure the
 /// source remains unchanged for the connection's lifetime.
+///
+/// Returns the native GraphiteSQL connection. Read-only protection applies to
+/// the encrypted main file through this VFS, not to the entire connection:
+/// GraphiteSQL can create or write other databases through `ATTACH` and use
+/// temporary tables. Operations outside this VFS are the caller's responsibility.
+/// In GraphiteSQL 0.1.6, `ATTACH` can create and attach a file before returning
+/// a read-only error during main-database autocommit; errors do not guarantee
+/// absence of side effects outside this VFS.
 pub fn open_readonly(
     path: impl AsRef<Path>,
     config: CipherConfig,
     passphrase: &[u8],
-) -> Result<ReadOnlyConnection, GraphiteAdapterError> {
+) -> Result<GraphiteConnection, GraphiteAdapterError> {
     let vfs = SqlCipherVfs::new(path, config, passphrase)?;
     check_companion_files(&vfs.main_path)?;
-    let inner =
-        GraphiteConnection::open_readonly_vfs(&vfs, &vfs.main_path_utf8).map_err(|source| {
-            GraphiteAdapterError::Open {
-                source: Box::new(source),
-            }
-        })?;
-    Ok(ReadOnlyConnection { inner })
-}
-
-fn convert_query_result(result: GraphiteQueryResult) -> QueryResult {
-    QueryResult {
-        columns: result.columns,
-        rows: result
-            .rows
-            .into_iter()
-            .map(|row| row.into_iter().map(convert_value).collect())
-            .collect(),
-    }
-}
-
-fn convert_value(value: GraphiteValue) -> Value {
-    match value {
-        GraphiteValue::Null => Value::Null,
-        GraphiteValue::Integer(value) => Value::Integer(value),
-        GraphiteValue::Real(value) => Value::Real(value),
-        GraphiteValue::Text(value) => Value::Text(value.into_bytes()),
-        GraphiteValue::Blob(value) => Value::Blob(value),
-    }
+    GraphiteConnection::open_readonly_vfs(&vfs, &vfs.main_path_utf8)
+        .map_err(|source| GraphiteAdapterError::Open { source })
 }
 
 fn read_only_error() -> GraphiteError {

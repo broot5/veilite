@@ -116,7 +116,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The adapter rejects writes and sibling `-wal` or `-journal` files.
+`open_readonly` returns a native `graphitesql::Connection` for use with
+GraphiteSQL's API. The adapter rejects sibling `-wal` and `-journal` files and
+protects the encrypted main file from writes through its VFS. Other file access,
+such as `ATTACH`, follows GraphiteSQL's behavior. Keep the source snapshot
+unchanged while the connection is open.
 
 ## License
 

@@ -540,7 +540,7 @@ fn write_value(value: &Value, output: &mut dyn Write) -> io::Result<()> {
         Value::Null => output.write_all(b"NULL"),
         Value::Integer(value) => write!(output, "{value}"),
         Value::Real(value) => write!(output, "{value}"),
-        Value::Text(value) => write!(output, "{:?}", BStr::new(value)),
+        Value::Text(value) => write!(output, "{:?}", BStr::new(value.as_bytes())),
         Value::Blob(value) => {
             output.write_all(b"X'")?;
             for byte in value {

@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
+use veilite_graphitesql::graphitesql::Text as EngineText;
 
 use clap::{CommandFactory, error::ErrorKind};
 
@@ -174,9 +175,11 @@ fn writes_query_results() {
             Value::Null,
             Value::Integer(-42),
             Value::Real(3.5),
-            Value::Text(b"hello".to_vec()),
-            Value::Text("pipe|line\n홍길동".as_bytes().to_vec()),
-            Value::Text(vec![b'a', 0xff]),
+            Value::Text(EngineText::from_bytes(b"hello".to_vec())),
+            Value::Text(EngineText::from_bytes(
+                "pipe|line\n홍길동".as_bytes().to_vec(),
+            )),
+            Value::Text(EngineText::from_bytes(vec![b'a', 0xff])),
             Value::Blob(vec![0x00, 0xab, 0xff]),
         ]],
     };

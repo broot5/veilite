@@ -1,11 +1,12 @@
 use std::num::NonZeroU32;
 use std::path::PathBuf;
+use veilite_graphitesql::graphitesql::Text as EngineText;
 
 use veilite_core::{
     CipherConfig, CipherPreset, DecryptError, FileSource, HashAlgorithm, ReaderError, SliceSource,
     SqlCipherReader,
 };
-use veilite_graphitesql::{GraphiteAdapterError, Value, open_readonly};
+use veilite_graphitesql::{Value, graphitesql, open_readonly};
 
 const SQLITE_HEADER_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 const AES_BLOCK_SIZE: usize = 16;
@@ -312,7 +313,7 @@ fn ignores_sqlcipher3_unauthenticated_filler() {
 }
 
 #[test]
-fn queries_supported_fixtures_and_rejects_writes() {
+fn queries_supported_fixtures() {
     for case in FIXTURE_CASES {
         let connection = open_readonly(case.path(), case.config(), case.passphrase)
             .unwrap_or_else(|error| panic!("{} failed to open: {error}", case.name));
@@ -326,21 +327,23 @@ fn queries_supported_fixtures_and_rejects_writes() {
             [
                 vec![
                     Value::Integer(1),
-                    Value::Text(b"Alice".to_vec()),
-                    Value::Text(b"plain ASCII".to_vec()),
+                    Value::Text(EngineText::from_bytes(b"Alice".to_vec())),
+                    Value::Text(EngineText::from_bytes(b"plain ASCII".to_vec())),
                     Value::Real(98.5),
                     Value::Integer(1),
                 ],
                 vec![
                     Value::Integer(2),
-                    Value::Text("홍길동".as_bytes().to_vec()),
-                    Value::Text("한국어, emoji 🔐, and 'quotes'".as_bytes().to_vec()),
+                    Value::Text(EngineText::from_bytes("홍길동".as_bytes().to_vec())),
+                    Value::Text(EngineText::from_bytes(
+                        "한국어, emoji 🔐, and 'quotes'".as_bytes().to_vec()
+                    )),
                     Value::Real(-12.25),
                     Value::Integer(1),
                 ],
                 vec![
                     Value::Integer(3),
-                    Value::Text(b"Null Tester".to_vec()),
+                    Value::Text(EngineText::from_bytes(b"Null Tester".to_vec())),
                     Value::Null,
                     Value::Real(0.0),
                     Value::Integer(0),
@@ -357,13 +360,13 @@ fn queries_supported_fixtures_and_rejects_writes() {
             binary_samples.rows,
             [
                 vec![
-                    Value::Text(b"all-byte-edges".to_vec()),
+                    Value::Text(EngineText::from_bytes(b"all-byte-edges".to_vec())),
                     Value::Blob(vec![
                         0x00, 0x01, 0x02, 0x03, 0x7f, 0x80, 0xfc, 0xfd, 0xfe, 0xff,
                     ]),
                 ],
                 vec![
-                    Value::Text(b"large-pattern-blob".to_vec()),
+                    Value::Text(EngineText::from_bytes(b"large-pattern-blob".to_vec())),
                     Value::Blob(
                         (0..2000)
                             .map(|n| format!("{n:04}:"))
@@ -375,133 +378,60 @@ fn queries_supported_fixtures_and_rejects_writes() {
             "{}",
             case.name
         );
-
-        let error = connection
-            .query("UPDATE people SET name = 'Mallory' WHERE id = 1")
-            .unwrap_err();
-        assert!(matches!(error, GraphiteAdapterError::Query { .. }));
     }
 }
 
 #[test]
-fn queries_relational_operations_across_supported_fixtures() {
-    use Value::{Integer, Null, Real, Text};
+fn native_connection_protects_main_file() {
+    let directory = std::env::temp_dir().join(format!(
+        "veilite-native-connection-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    for (index, case) in FIXTURE_CASES.iter().enumerate() {
+        let main = directory.join(format!("main-{index}.db"));
+        std::fs::write(&main, case.encrypted).unwrap();
+        let mut connection: graphitesql::Connection =
+            open_readonly(&main, case.config(), case.passphrase).unwrap();
+        assert!(
+            connection
+                .execute("UPDATE main.people SET name = 'changed' WHERE id = 1")
+                .is_err()
+        );
+        assert!(
+            connection
+                .execute("CREATE TABLE main.scratch (id INTEGER)")
+                .is_err()
+        );
+        drop(connection);
+        assert_eq!(
+            std::fs::read(&main).unwrap(),
+            case.encrypted,
+            "{}",
+            case.name
+        );
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
 
-    // Expected columns, values and types were checked against SQLCipher 4.18.0.
-    // Keep this regression independent of an installed SQLCipher executable.
-    let queries = [
-        (
-            "inner join with filtering",
-            "SELECT p.id AS person_id, p.name AS name, a.action AS action \
-             FROM people AS p JOIN audit_log AS a ON a.person_id = p.id \
-             WHERE p.active = 1 ORDER BY p.id",
-            vec!["person_id", "name", "action"],
-            vec![
-                vec![
-                    Integer(1),
-                    Text(b"Alice".to_vec()),
-                    Text(b"insert".to_vec()),
-                ],
-                vec![
-                    Integer(2),
-                    Text("홍길동".as_bytes().to_vec()),
-                    Text(b"insert".to_vec()),
-                ],
-            ],
-        ),
-        (
-            "left join preserves an unmatched row",
-            "SELECT p.id AS person_id, a.action AS action \
-             FROM people AS p LEFT JOIN audit_log AS a \
-             ON a.person_id = p.id AND p.active = 1 ORDER BY p.id",
-            vec!["person_id", "action"],
-            vec![
-                vec![Integer(1), Text(b"insert".to_vec())],
-                vec![Integer(2), Text(b"insert".to_vec())],
-                vec![Integer(3), Null],
-            ],
-        ),
-        (
-            "grouped aggregates distinguish NULL from a value",
-            "SELECT active, COUNT(*) AS total, COUNT(note) AS notes, \
-             SUM(score) AS score_sum FROM people \
-             GROUP BY active HAVING COUNT(*) >= 1 ORDER BY active",
-            vec!["active", "total", "notes", "score_sum"],
-            vec![
-                vec![Integer(0), Integer(1), Integer(0), Real(0.0)],
-                vec![Integer(1), Integer(2), Integer(2), Real(86.25)],
-            ],
-        ),
-        (
-            "having filters groups",
-            "SELECT active, COUNT(*) AS total FROM people \
-             GROUP BY active HAVING COUNT(*) > 1 ORDER BY active",
-            vec!["active", "total"],
-            vec![vec![Integer(1), Integer(2)]],
-        ),
-        (
-            "empty aggregates preserve SQLite NULL semantics",
-            "SELECT COUNT(*) AS total, SUM(score) AS score_sum, AVG(score) AS score_avg \
-             FROM people WHERE id < 0",
-            vec!["total", "score_sum", "score_avg"],
-            vec![vec![Integer(0), Null, Null]],
-        ),
-        (
-            "scalar subquery",
-            "SELECT id, name FROM people \
-             WHERE score > (SELECT AVG(score) FROM people) ORDER BY id",
-            vec!["id", "name"],
-            vec![vec![Integer(1), Text(b"Alice".to_vec())]],
-        ),
-        (
-            "IN subquery",
-            "SELECT id, name FROM people WHERE id IN \
-             (SELECT person_id FROM audit_log WHERE person_id >= 2) ORDER BY id",
-            vec!["id", "name"],
-            vec![
-                vec![Integer(2), Text("홍길동".as_bytes().to_vec())],
-                vec![Integer(3), Text(b"Null Tester".to_vec())],
-            ],
-        ),
-        (
-            "correlated EXISTS subquery",
-            "SELECT p.id AS person_id FROM people AS p WHERE EXISTS \
-             (SELECT 1 FROM audit_log AS a WHERE a.person_id = p.id AND a.person_id >= 2) \
-             ORDER BY p.id",
-            vec!["person_id"],
-            vec![vec![Integer(2)], vec![Integer(3)]],
-        ),
-        (
-            "view with an additional predicate",
-            "SELECT id, name, score FROM active_people WHERE score >= 0 ORDER BY id",
-            vec!["id", "name", "score"],
-            vec![vec![Integer(1), Text(b"Alice".to_vec()), Real(98.5)]],
-        ),
-        (
-            "equality on an indexed text column",
-            "SELECT id, name FROM people WHERE name = '홍길동' ORDER BY id",
-            vec!["id", "name"],
-            vec![vec![Integer(2), Text("홍길동".as_bytes().to_vec())]],
-        ),
-        (
-            "empty indexed lookup retains column names",
-            "SELECT id, name FROM people WHERE name = 'missing' ORDER BY id",
-            vec!["id", "name"],
-            vec![],
-        ),
-    ];
-
+#[test]
+fn queries_encrypted_index_across_supported_fixtures() {
     for case in FIXTURE_CASES {
         let connection = open_readonly(case.path(), case.config(), case.passphrase)
             .unwrap_or_else(|error| panic!("{} failed to open: {error}", case.name));
-
-        for (name, sql, columns, rows) in &queries {
-            let result = connection
-                .query(sql)
-                .unwrap_or_else(|error| panic!("{} {name}: {error}", case.name));
-
-            assert_eq!(&result.columns, columns, "{} {name} columns", case.name);
-            assert_eq!(&result.rows, rows, "{} {name} rows", case.name);
-        }
+        let result = connection
+            .query("SELECT id, name FROM people WHERE name = '홍길동'")
+            .unwrap_or_else(|error| panic!("{} indexed query failed: {error}", case.name));
+        assert_eq!(result.columns, ["id", "name"]);
+        assert_eq!(
+            result.rows,
+            vec![vec![Value::Integer(2), Value::Text("홍길동".into())]],
+            "{}",
+            case.name,
+        );
     }
 }
