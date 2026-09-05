@@ -1,11 +1,10 @@
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-const WAL_SUFFIX: &str = "-wal";
-const JOURNAL_SUFFIX: &str = "-journal";
+pub(super) const WAL_SUFFIX: &str = "-wal";
+pub(super) const JOURNAL_SUFFIX: &str = "-journal";
 
 /// Error returned while enforcing the immutable main-database policy.
 #[derive(Debug, Error)]
@@ -53,18 +52,14 @@ pub fn check_companion_files(path: impl AsRef<Path>) -> Result<(), CompanionErro
 }
 
 fn path_exists(path: &Path) -> Result<bool, CompanionError> {
-    match fs::metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(CompanionError::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
-    }
+    path.try_exists().map_err(|source| CompanionError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 /// Constructs a sibling companion path by appending `suffix`.
-pub fn companion_path(path: &Path, suffix: &str) -> PathBuf {
+pub(super) fn companion_path(path: &Path, suffix: &str) -> PathBuf {
     let mut companion = path.as_os_str().to_os_string();
     companion.push(suffix);
     companion.into()

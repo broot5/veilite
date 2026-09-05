@@ -1,5 +1,5 @@
 use std::error::Error as StdError;
-use std::fs;
+use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -13,12 +13,9 @@ use zeroize::Zeroizing;
 
 use veilite_core::{CipherConfig, DecryptError, FileSource, ReaderError, SqlCipherReader};
 
-#[cfg(test)]
-use crate::companion::companion_path;
+use crate::companion::{JOURNAL_SUFFIX, WAL_SUFFIX, companion_path};
 use crate::{CompanionError, check_companion_files};
 
-const WAL_SUFFIX: &str = "-wal";
-const JOURNAL_SUFFIX: &str = "-journal";
 const READ_ONLY_ERROR: &str = "database is read-only";
 const WAL_ERROR: &str = "SQLCipher WAL files are unsupported";
 const JOURNAL_ERROR: &str = "SQLCipher rollback journals are unsupported";
@@ -156,10 +153,10 @@ impl Vfs for SqlCipherVfs {
             return Err(read_only_error());
         }
         if path != self.main_path_utf8 {
-            if path == companion_path_string(&self.main_path_utf8, WAL_SUFFIX) {
+            if OsStr::new(path) == companion_path(&self.main_path, WAL_SUFFIX).as_os_str() {
                 return Err(GraphiteError::Unsupported(WAL_ERROR));
             }
-            if path == companion_path_string(&self.main_path_utf8, JOURNAL_SUFFIX) {
+            if OsStr::new(path) == companion_path(&self.main_path, JOURNAL_SUFFIX).as_os_str() {
                 return Err(GraphiteError::Unsupported(JOURNAL_ERROR));
             }
             return Err(GraphiteError::CantOpen(path.to_owned()));
@@ -184,11 +181,9 @@ impl Vfs for SqlCipherVfs {
     }
 
     fn exists(&self, path: &str) -> graphitesql::Result<bool> {
-        match fs::metadata(path) {
-            Ok(_) => Ok(true),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(GraphiteError::Io(error.to_string())),
-        }
+        Path::new(path)
+            .try_exists()
+            .map_err(|error| GraphiteError::Io(error.to_string()))
     }
 }
 
@@ -244,13 +239,6 @@ fn map_companion_to_graphite(error: CompanionError) -> GraphiteError {
         CompanionError::UnsupportedJournal { .. } => GraphiteError::Unsupported(JOURNAL_ERROR),
         io_error @ CompanionError::Io { .. } => GraphiteError::Io(io_error.to_string()),
     }
-}
-
-fn companion_path_string(path: &str, suffix: &str) -> String {
-    let mut companion = String::with_capacity(path.len() + suffix.len());
-    companion.push_str(path);
-    companion.push_str(suffix);
-    companion
 }
 
 fn map_reader_error(error: ReaderError<io::Error>) -> GraphiteError {

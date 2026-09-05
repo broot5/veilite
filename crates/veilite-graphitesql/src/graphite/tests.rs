@@ -19,7 +19,7 @@ fn file_adapter_is_strictly_read_only() {
     let path_utf8 = path.to_str().unwrap();
     let vfs = SqlCipherVfs::new(&path, CipherPreset::SqlCipher4.into(), TEST_PASSPHRASE).unwrap();
     let mut file = Vfs::open(&vfs, path_utf8, OpenFlags::READ_ONLY).unwrap();
-    let wal_path = companion_path_string(path_utf8, WAL_SUFFIX);
+    let wal_path = format!("{path_utf8}-wal");
 
     assert!(Vfs::exists(&vfs, path_utf8).unwrap());
     assert!(!Vfs::exists(&vfs, &wal_path).unwrap());
@@ -49,8 +49,24 @@ fn rejects_companion_files_before_opening_the_database() {
     let database_path = directory.path().join("encrypted.db");
     let wal_path = companion_path(&database_path, WAL_SUFFIX);
     let journal_path = companion_path(&database_path, JOURNAL_SUFFIX);
+    let vfs = SqlCipherVfs::new(
+        &database_path,
+        CipherPreset::SqlCipher4.into(),
+        TEST_PASSPHRASE,
+    )
+    .unwrap();
+
+    for (path, message) in [(&wal_path, WAL_ERROR), (&journal_path, JOURNAL_ERROR)] {
+        let path = path.to_str().unwrap();
+        assert!(!Vfs::exists(&vfs, path).unwrap());
+        assert!(matches!(
+            Vfs::open(&vfs, path, OpenFlags::READ_ONLY),
+            Err(GraphiteError::Unsupported(actual)) if actual == message
+        ));
+    }
 
     File::create(&wal_path).unwrap();
+    assert!(Vfs::exists(&vfs, wal_path.to_str().unwrap()).unwrap());
     assert!(matches!(
         open_readonly(
             &database_path,
@@ -63,6 +79,8 @@ fn rejects_companion_files_before_opening_the_database() {
 
     fs::remove_file(&wal_path).unwrap();
     File::create(&journal_path).unwrap();
+    assert!(!Vfs::exists(&vfs, wal_path.to_str().unwrap()).unwrap());
+    assert!(Vfs::exists(&vfs, journal_path.to_str().unwrap()).unwrap());
     assert!(matches!(
         open_readonly(
             &database_path,
