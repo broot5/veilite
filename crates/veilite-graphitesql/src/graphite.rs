@@ -142,7 +142,7 @@ impl Vfs for SqlCipherVfs {
 /// the encrypted main file through this VFS, not to the entire connection:
 /// GraphiteSQL can create or write other databases through `ATTACH` and use
 /// temporary tables. Operations outside this VFS are the caller's responsibility.
-/// In GraphiteSQL 0.1.6, `ATTACH` can create and attach a file before returning
+/// GraphiteSQL `ATTACH` can create and attach a file before returning
 /// a read-only error during main-database autocommit; errors do not guarantee
 /// absence of side effects outside this VFS.
 pub fn open_readonly(
