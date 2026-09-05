@@ -100,8 +100,7 @@ check.
 ### `veilite-graphitesql`
 
 ```rust
-use veilite_core::CipherPreset;
-use veilite_graphitesql::open_readonly;
+use veilite_graphitesql::{CipherPreset, open_readonly};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let connection = open_readonly(

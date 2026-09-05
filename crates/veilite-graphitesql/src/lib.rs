@@ -9,8 +9,7 @@
 //! this adapter does not restrict filesystem access outside its VFS.
 //!
 //! Results, values, bindings and query errors are GraphiteSQL types, tied to the
-//! adapter's pinned
-//! engine version. [`graphitesql`] re-exports that exact dependency; [`Params`]
+//! adapter's pinned engine version. [`graphitesql`] re-exports that exact dependency; [`Params`]
 //! is an upstream type re-exported from its internal module.
 //!
 //! Results are fully materialized. Text preserves raw bytes: use
@@ -29,4 +28,5 @@ pub use graphite::{GraphiteAdapterError, open_readonly};
 pub use graphitesql;
 /// GraphiteSQL bindings, re-exported from its internal module for convenience.
 pub use graphitesql::exec::eval::Params;
-pub use graphitesql::{QueryResult, Value};
+pub use graphitesql::{QueryResult, Text, Value};
+pub use veilite_core::{CipherConfig, CipherConfigError, CipherPreset, HashAlgorithm};
