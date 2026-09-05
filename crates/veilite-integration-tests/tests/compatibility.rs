@@ -363,8 +363,13 @@ fn queries_supported_fixtures_and_rejects_writes() {
                     ]),
                 ],
                 vec![
-                    Value::Text(b"large-zero-blob".to_vec()),
-                    Value::Blob(vec![0; 10_000]),
+                    Value::Text(b"large-pattern-blob".to_vec()),
+                    Value::Blob(
+                        (0..2000)
+                            .map(|n| format!("{n:04}:"))
+                            .collect::<String>()
+                            .into_bytes(),
+                    ),
                 ],
             ],
             "{}",

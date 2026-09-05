@@ -54,7 +54,14 @@ INSERT INTO people(id, name, note, score, active, created_at) VALUES
     (3, 'Null Tester', NULL, 0.0, 0, '2026-08-04T23:59:59Z');
 
 INSERT INTO binary_samples(name, payload) VALUES
-    ('all-byte-edges', X'000102037F80FCFDFEFF'),
-    ('large-zero-blob', zeroblob(10000));
+    ('all-byte-edges', X'000102037F80FCFDFEFF');
+
+-- Numbered records make missing, duplicated and reordered overflow data visible.
+WITH RECURSIVE records(n) AS (
+    VALUES(0) UNION ALL SELECT n + 1 FROM records WHERE n < 1999
+)
+INSERT INTO binary_samples(name, payload)
+SELECT 'large-pattern-blob', CAST(group_concat(printf('%04d:', n), '') AS BLOB)
+FROM (SELECT n FROM records ORDER BY n);
 
 COMMIT;
