@@ -8,6 +8,8 @@ OpenSSL. Rust 1.89 or newer is required.
 
 ## Components
 
+- `sqlite-reader` provides independent schema, table, and index reads for
+  plaintext SQLite snapshots. See its [README](crates/sqlite-reader/README.md).
 - `veilite-core` provides authenticated random-access page reads and
   AES-256-CBC decryption.
 - `veilite-graphitesql` runs read-only SQL queries through

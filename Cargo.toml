@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/sqlite-reader",
     "crates/veilite-core",
     "crates/veilite-graphitesql",
     "crates/veilite-cli",
