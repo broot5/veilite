@@ -12,7 +12,7 @@ Add the crate from a local checkout, adjusting the path to your project:
 sqlite-reader = { path = "../veilite/crates/sqlite-reader" }
 ```
 
-```no_run
+```rust,no_run
 use sqlite_reader::{Database, FileSource, Reader};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
