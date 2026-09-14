@@ -763,3 +763,36 @@ fn constant(mut tokens: &[Token], affinity: Affinity, encoding: TextEncoding) ->
         _ => Err("expression DEFAULT is unsupported"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_invalid_stored_generated_declarations() {
+        for definition in [
+            "a, b AS () STORED",
+            "a, b AS (a+1) STORED DEFAULT 0",
+            "a, b DEFAULT 0 AS (a+1) STORED",
+            "a, b AS (a+1) STORED PRIMARY KEY",
+            "a, b AS (a+1) STORED, PRIMARY KEY(b)",
+            "a, b AS (a+1) STORED AS (a+2) STORED",
+            "a AS (1) STORED",
+        ] {
+            assert!(
+                parse(&format!("CREATE TABLE t({definition})"), TextEncoding::Utf8).is_err(),
+                "{definition}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_numeric_separators_do_not_become_valid_defaults() {
+        for literal in [
+            "1__0", "1_", "1_.0", "1._0", "1_e2", "1e_2", "0x_FF", "0xFF_",
+        ] {
+            let sql = format!("CREATE TABLE t(value NUMERIC DEFAULT {literal})");
+            assert!(parse(&sql, TextEncoding::Utf8).is_err(), "{literal}");
+        }
+    }
+}

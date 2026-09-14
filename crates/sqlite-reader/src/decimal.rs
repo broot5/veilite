@@ -1,20 +1,4 @@
-//! Decimal parsing compatible with SQLite 3.51.0 sqlite3AtoF (src/util.c).
-//! Preserve its bounded significand and double-double operation order. Do not
-//! replace these operations with fused multiply-add or Rust's decimal parser.
-
-fn multiply(pair: &mut [f64; 2], factor: f64, correction: f64) {
-    let high = f64::from_bits(pair[0].to_bits() & 0xffff_ffff_fc00_0000);
-    let factor_high = f64::from_bits(factor.to_bits() & 0xffff_ffff_fc00_0000);
-    let low = pair[0] - high;
-    let factor_low = factor - factor_high;
-    let product = high * factor_high;
-    let cross = high * factor_low + low * factor_high;
-    let sum = product + cross;
-    let residual = product - sum + cross + low * factor_low;
-    let residual = pair[0] * correction + pair[1] * factor + residual;
-    pair[0] = sum + residual;
-    pair[1] = (sum - pair[0]) + residual;
-}
+//! Decimal parsing with SQLite 3.53.4 sqlite3AtoF significand retention.
 
 /// Parses a complete ASCII decimal, without whitespace or SQL separators.
 pub(crate) fn parse(text: &str) -> Option<f64> {
@@ -78,63 +62,29 @@ pub(crate) fn parse(text: &str) -> Option<f64> {
         return Some(if negative { -0.0 } else { 0.0 });
     }
     exponent += shift;
-    while exponent > 0 && significand < (u64::MAX - 0x7ff) / 10 {
-        significand *= 10;
-        exponent -= 1;
-    }
-    while exponent < 0 && significand.is_multiple_of(10) {
-        significand /= 10;
-        exponent += 1;
-    }
-    let high = significand as f64;
-    let low = if high <= 18_446_744_073_709_549_568.0 {
-        let rounded = high as u64;
-        if significand >= rounded {
-            (significand - rounded) as f64
-        } else {
-            -((rounded - significand) as f64)
-        }
-    } else {
-        0.0
-    };
-    let mut pair = [high, low];
-    // Beyond these bounds every nonzero bounded significand over/underflows.
-    // This also bounds work for arbitrarily long numeric tokens.
-    if exponent > 400 {
-        return Some(if negative {
-            f64::NEG_INFINITY
-        } else {
-            f64::INFINITY
-        });
-    }
-    if exponent < -400 {
-        return Some(if negative { -0.0 } else { 0.0 });
-    }
-    while exponent >= 100 {
-        multiply(&mut pair, 1e100, -1.590_289_110_975_991_8e83);
-        exponent -= 100;
-    }
-    while exponent >= 10 {
-        multiply(&mut pair, 1e10, 0.0);
-        exponent -= 10;
-    }
-    while exponent >= 1 {
-        multiply(&mut pair, 10.0, 0.0);
-        exponent -= 1;
-    }
-    while exponent <= -100 {
-        multiply(&mut pair, 1e-100, -1.999_189_980_260_288_3e-117);
-        exponent += 100;
-    }
-    while exponent <= -10 {
-        multiply(&mut pair, 1e-10, -3.643_219_731_549_774e-27);
-        exponent += 10;
-    }
-    while exponent <= -1 {
-        multiply(&mut pair, 0.1, -5.551_115_123_125_783e-18);
-        exponent += 1;
-    }
-    let value = pair[0] + pair[1];
-    let value = if value.is_nan() { f64::INFINITY } else { value };
+    // SQLite 3.53.4 converts the retained u64 significand times 10^exponent
+    // to the nearest binary64. Parse only that bounded decimal, not the input:
+    // digits discarded above must not influence rounding.
+    let value = format!("{significand}e{exponent}").parse::<f64>().ok()?;
     Some(if negative { -value } else { value })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn decimal_bits_match_sqlite() {
+        for line in include_str!("../tests/fixtures/decimal.tsv").lines() {
+            let (literal, bits) = line.split_once('\t').unwrap();
+            assert_eq!(
+                super::parse(literal).unwrap().to_bits(),
+                u64::from_str_radix(bits, 16).unwrap(),
+                "{literal}"
+            );
+        }
+        for invalid in [
+            "", "+", ".", "1e", "1e+", "1.2.3", "NaN", "inf", "1_0", "--1",
+        ] {
+            assert!(super::parse(invalid).is_none(), "{invalid}");
+        }
+    }
 }

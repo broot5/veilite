@@ -1,0 +1,11 @@
+integer|real|real|real|integer
+id|INT|1|1
+value|TEXT|0|0
+id|INTEGER|0|1
+value|TEXT|0|0
+id|INTEGER|1|1
+value|TEXT|0|0
+a|INT|1|1
+b|TEXT|1|2
+id|INT|0|1
+value|TEXT|0|0

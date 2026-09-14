@@ -49,7 +49,10 @@ pub(crate) fn number_literal(
         // The only REAL produced by a hex literal is negation of i64::MIN.
         // SQLite formats that computed value rather than preserving the token.
         if hex && matches!(value, Value::Real(_)) {
-            return Ok(Value::Text(Text::encode("9.22337203685478e+18", encoding)));
+            return Ok(Value::Text(Text::encode(
+                "9.2233720368547758e+18",
+                encoding,
+            )));
         }
         if !hex && unsigned.parse::<i64>().is_err() {
             return Ok(Value::Text(Text::encode(

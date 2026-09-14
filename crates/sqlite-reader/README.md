@@ -46,7 +46,7 @@ and encoding; `Text::to_string()` performs checked Unicode conversion.
 
 Tables containing VIRTUAL generated columns or expression defaults are rejected
 when opened. Other supported tables and schema enumeration remain available.
-Numeric default conversion follows SQLite 3.51.0; floating-point results can
+Numeric default conversion follows SQLite 3.53.4; floating-point results can
 vary slightly across SQLite versions or builds.
 
 ## Limits

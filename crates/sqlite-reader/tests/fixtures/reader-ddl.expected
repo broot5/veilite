@@ -1,0 +1,10 @@
+payload|Case|7
+value|42|b
+9|42|separate
+-9223372036854775808|65535|125.0|text|1_000
+payload|0
+a|1
+b|2
+payload|0
+a|1
+b|2

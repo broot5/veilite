@@ -147,3 +147,29 @@ impl ReadAt for FileSource {
         self.file.metadata().map(|metadata| metadata.len())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slice_source_reads_exact_ranges() {
+        let source = SliceSource::new(b"0123456789");
+        let mut output = [0; 4];
+
+        source.read_exact_at(3, &mut output).unwrap();
+
+        assert_eq!(&output, b"3456");
+        assert_eq!(source.len().unwrap(), 10);
+    }
+
+    #[test]
+    fn slice_source_rejects_ranges_past_the_end() {
+        let source = SliceSource::new(b"0123456789");
+        let mut output = [0; 2];
+
+        let error = source.read_exact_at(9, &mut output).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    }
+}
