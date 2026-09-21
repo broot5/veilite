@@ -1,15 +1,11 @@
 [package]
-name = "sqlite-reader"
+name = "sqlite-source"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Read-only access to SQLite snapshot schemas, tables, and indexes"
+description = "Shared byte and page source interfaces for immutable SQLite snapshots"
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
 keywords = ["sqlite", "database"]
 categories = ["database"]
-
-[dependencies]
-sqlite-source.workspace = true
-thiserror.workspace = true

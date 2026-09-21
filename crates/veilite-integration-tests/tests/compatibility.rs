@@ -1,12 +1,10 @@
 use std::num::NonZeroU32;
 use std::path::PathBuf;
-use veilite_graphitesql::graphitesql::Text as EngineText;
 
 use veilite_core::{
     CipherConfig, CipherPreset, DecryptError, FileSource, HashAlgorithm, ReaderError, SliceSource,
     SqlCipherReader,
 };
-use veilite_graphitesql::{Value, graphitesql, open_readonly};
 
 const SQLITE_HEADER_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 const AES_BLOCK_SIZE: usize = 16;
@@ -85,6 +83,76 @@ const SQLCIPHER_CUSTOM_CASE: FixtureCase = FixtureCase {
 };
 
 const FIXTURE_CASES: [FixtureCase; 3] = [SQLCIPHER3_CASE, SQLCIPHER4_CASE, SQLCIPHER_CUSTOM_CASE];
+
+#[test]
+fn page_source_and_sqlite_reader_preserve_authentication_failures() {
+    for case in FIXTURE_CASES {
+        let pages = SqlCipherReader::open(
+            SliceSource::new(case.encrypted),
+            case.config(),
+            b"wrong passphrase",
+        )
+        .unwrap();
+        let mut output = vec![0xaa; case.page_size];
+        let error = sqlite_reader::PageSource::read_page_into(&pages, NonZeroU32::MIN, &mut output)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ReaderError::Decrypt(DecryptError::AuthenticationFailed { page_no: 1 })
+        ));
+        assert!(output.iter().all(|byte| *byte == 0));
+        assert!(matches!(
+            sqlite_reader::Reader::open(pages),
+            Err(sqlite_reader::ReaderError::Source(ReaderError::Decrypt(
+                DecryptError::AuthenticationFailed { page_no: 1 }
+            )))
+        ));
+
+        let reader = sqlite_reader::Reader::open(case.reader()).unwrap();
+        let index_page = reader
+            .index("people_name_idx")
+            .unwrap()
+            .schema_object()
+            .root_page;
+        let last_page = u32::try_from(case.encrypted.len() / case.page_size).unwrap();
+        // The final page belongs to the large BLOB's overflow chain. Reading
+        // earlier rows succeeds, but no partial large row may escape.
+        for page in [index_page, last_page] {
+            let mut bytes = case.encrypted.to_vec();
+            bytes[(page as usize - 1) * case.page_size + 16] ^= 1;
+            let pages =
+                SqlCipherReader::open(SliceSource::new(&bytes), case.config(), case.passphrase)
+                    .unwrap();
+            sqlite_reader::PageSource::read_page_into(
+                &pages,
+                NonZeroU32::new(page).unwrap(),
+                &mut output,
+            )
+            .unwrap_err();
+            assert!(output.iter().all(|byte| *byte == 0));
+            let reader = sqlite_reader::Reader::open(pages).unwrap();
+            let error = if page == index_page {
+                let index = reader.index("people_name_idx").unwrap();
+                let mut entries = index.entries();
+                let error = entries.next().unwrap().unwrap_err();
+                assert!(entries.next().is_none());
+                error
+            } else {
+                let table = reader.table("binary_samples").unwrap();
+                let mut rows = table.rows();
+                assert!(rows.next().unwrap().is_ok());
+                let error = rows.next().unwrap().unwrap_err();
+                assert!(rows.next().is_none());
+                error
+            };
+            assert!(matches!(error,
+                sqlite_reader::ReaderError::Source(ReaderError::Decrypt(
+                    DecryptError::AuthenticationFailed { page_no }
+                )) if page_no == page
+            ));
+        }
+    }
+}
 
 #[test]
 fn authenticates_and_restores_supported_fixtures() {
@@ -311,129 +379,5 @@ fn ignores_sqlcipher3_unauthenticated_filler() {
             .read_page_into(page_no, &mut actual)
             .unwrap();
         assert_eq!(actual, expected);
-    }
-}
-
-#[test]
-fn queries_supported_fixtures() {
-    for case in FIXTURE_CASES {
-        let connection = open_readonly(case.path(), case.config(), case.passphrase)
-            .unwrap_or_else(|error| panic!("{} failed to open: {error}", case.name));
-
-        let people = connection
-            .query("SELECT id, name, note, score, active FROM people ORDER BY id")
-            .unwrap_or_else(|error| panic!("{} people query failed: {error}", case.name));
-        assert_eq!(people.columns, ["id", "name", "note", "score", "active"]);
-        assert_eq!(
-            people.rows,
-            [
-                vec![
-                    Value::Integer(1),
-                    Value::Text(EngineText::from_bytes(b"Alice".to_vec())),
-                    Value::Text(EngineText::from_bytes(b"plain ASCII".to_vec())),
-                    Value::Real(98.5),
-                    Value::Integer(1),
-                ],
-                vec![
-                    Value::Integer(2),
-                    Value::Text(EngineText::from_bytes("홍길동".as_bytes().to_vec())),
-                    Value::Text(EngineText::from_bytes(
-                        "한국어, emoji 🔐, and 'quotes'".as_bytes().to_vec()
-                    )),
-                    Value::Real(-12.25),
-                    Value::Integer(1),
-                ],
-                vec![
-                    Value::Integer(3),
-                    Value::Text(EngineText::from_bytes(b"Null Tester".to_vec())),
-                    Value::Null,
-                    Value::Real(0.0),
-                    Value::Integer(0),
-                ],
-            ],
-            "{}",
-            case.name
-        );
-
-        let binary_samples = connection
-            .query("SELECT name, payload FROM binary_samples ORDER BY name")
-            .unwrap_or_else(|error| panic!("{} blob query failed: {error}", case.name));
-        assert_eq!(
-            binary_samples.rows,
-            [
-                vec![
-                    Value::Text(EngineText::from_bytes(b"all-byte-edges".to_vec())),
-                    Value::Blob(vec![
-                        0x00, 0x01, 0x02, 0x03, 0x7f, 0x80, 0xfc, 0xfd, 0xfe, 0xff,
-                    ]),
-                ],
-                vec![
-                    Value::Text(EngineText::from_bytes(b"large-pattern-blob".to_vec())),
-                    Value::Blob(
-                        (0..2000)
-                            .map(|n| format!("{n:04}:"))
-                            .collect::<String>()
-                            .into_bytes(),
-                    ),
-                ],
-            ],
-            "{}",
-            case.name
-        );
-    }
-}
-
-#[test]
-fn native_connection_protects_main_file() {
-    let directory = std::env::temp_dir().join(format!(
-        "veilite-native-connection-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos(),
-    ));
-    std::fs::create_dir(&directory).unwrap();
-    for (index, case) in FIXTURE_CASES.iter().enumerate() {
-        let main = directory.join(format!("main-{index}.db"));
-        std::fs::write(&main, case.encrypted).unwrap();
-        let mut connection: graphitesql::Connection =
-            open_readonly(&main, case.config(), case.passphrase).unwrap();
-        assert!(
-            connection
-                .execute("UPDATE main.people SET name = 'changed' WHERE id = 1")
-                .is_err()
-        );
-        assert!(
-            connection
-                .execute("CREATE TABLE main.scratch (id INTEGER)")
-                .is_err()
-        );
-        drop(connection);
-        assert_eq!(
-            std::fs::read(&main).unwrap(),
-            case.encrypted,
-            "{}",
-            case.name
-        );
-    }
-    std::fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn queries_encrypted_index_across_supported_fixtures() {
-    for case in FIXTURE_CASES {
-        let connection = open_readonly(case.path(), case.config(), case.passphrase)
-            .unwrap_or_else(|error| panic!("{} failed to open: {error}", case.name));
-        let result = connection
-            .query("SELECT id, name FROM people WHERE name = '홍길동'")
-            .unwrap_or_else(|error| panic!("{} indexed query failed: {error}", case.name));
-        assert_eq!(result.columns, ["id", "name"]);
-        assert_eq!(
-            result.rows,
-            vec![vec![Value::Integer(2), Value::Text("홍길동".into())]],
-            "{}",
-            case.name,
-        );
     }
 }

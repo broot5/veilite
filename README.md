@@ -8,14 +8,14 @@ OpenSSL. Rust 1.89 or newer is required.
 
 ## Components
 
+- `sqlite-source` provides shared byte and page source interfaces. See its
+  [README](crates/sqlite-source/README.md).
 - `sqlite-reader` provides independent schema, table, and index reads for
   plaintext SQLite snapshots. See its [README](crates/sqlite-reader/README.md).
 - `veilite-core` provides authenticated random-access page reads and
   AES-256-CBC decryption.
-- `veilite-graphitesql` runs read-only SQL queries through
-  [GraphiteSQL](https://github.com/KarpelesLab/graphitesql).
-- `veilite` is the command-line interface for inspecting, verifying, exporting,
-  and querying snapshots.
+- `veilite` is the command-line interface for inspecting, verifying, and
+  exporting snapshots.
 
 ## Compatibility
 
@@ -52,9 +52,6 @@ veilite verify --preset 4 encrypted.db
 
 # Export a plaintext SQLite image
 veilite export --preset 4 encrypted.db plaintext.db
-
-# Run a read-only query
-veilite query --preset 4 encrypted.db 'SELECT id, title FROM notes ORDER BY id'
 ```
 
 For a custom configuration, supply all four cipher parameters explicitly:
@@ -68,13 +65,17 @@ veilite verify --custom \
   encrypted.db
 ```
 
-`verify`, `export`, and `query` prompt for a passphrase. Use
+`verify` and `export` prompt for a passphrase. Use
 `--passphrase-file FILE` to read it from the first line of a file. `inspect`
 reports sibling `-wal` and `-journal` files; the other commands reject them.
 
-`export` does not overwrite an existing destination. Query output is
-human-readable and is not a stable machine-readable format. Run `veilite help`
-or `veilite <command> --help` for the full CLI reference.
+`export` does not overwrite an existing destination. Run `veilite help` or
+`veilite <command> --help` for the full CLI reference.
+
+`verify` authenticates every physical page present in the file; it does not
+establish SQLite logical integrity or prove that the snapshot is complete or
+current. Removing whole pages from the end may not be detected by authentication
+of the remaining pages.
 
 ## Libraries
 
@@ -99,29 +100,11 @@ Opening a reader derives keys but does not authenticate the entire database.
 Pages are authenticated as they are read; use `veilite verify` for a full
 check.
 
-### `veilite-graphitesql`
-
-```rust
-use veilite_graphitesql::{CipherPreset, open_readonly};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let connection = open_readonly(
-        "encrypted.db",
-        CipherPreset::SqlCipher4.into(),
-        b"example passphrase",
-    )?;
-    let result = connection.query("SELECT id, title FROM notes ORDER BY id")?;
-
-    println!("{result:#?}");
-    Ok(())
-}
-```
-
-`open_readonly` returns a native `graphitesql::Connection` for use with
-GraphiteSQL's API. The adapter rejects sibling `-wal` and `-journal` files and
-protects the encrypted main file from writes through its VFS. Other file access,
-such as `ATTACH`, follows GraphiteSQL's behavior. Keep the source snapshot
-unchanged while the connection is open.
+`SqlCipherReader` also implements `sqlite_reader::PageSource`. Pass it to
+`sqlite_reader::Reader::open` to read schema, tables, and indexes without a SQL
+engine. Opening the SQLite reader authenticates page 1; subsequent pages are
+authenticated as they are read. This requires the same complete, immutable
+main database snapshot described above.
 
 ## License
 

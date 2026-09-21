@@ -63,8 +63,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}-${{ matrix.toolchain }}
-      - name: Build
-        run: cargo build --workspace --locked
       - name: Test
         run: cargo test --workspace --all-targets --locked
       - name: Clippy
@@ -75,3 +73,6 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --locked
+      - name: Test documentation examples
+        if: matrix.toolchain == 'stable' && matrix.runner == 'ubuntu-24.04'
+        run: cargo test --workspace --doc --locked
