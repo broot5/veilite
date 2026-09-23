@@ -267,12 +267,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 }
 
 fn export(args: ExportArgs) -> Result<(), Box<dyn Error>> {
-    let config = args.cipher.config()?;
-    check_companion_files(&args.input_path)?;
-    let passphrase = read_passphrase(&args.passphrase)?;
-    let source = open_encrypted_database(&args.input_path)?;
-    let reader = SqlCipherReader::open(source, config, passphrase.as_slice())?;
-    drop(passphrase);
+    let reader = open_reader(&args.input_path, &args.cipher, &args.passphrase)?;
 
     write_decrypted_database(&args.output_path, &reader)?;
 
@@ -341,6 +336,20 @@ fn open_encrypted_database(path: &Path) -> io::Result<FileSource> {
         .map_err(|source| path_io_error("failed to open encrypted database", path, source))
 }
 
+fn open_reader(
+    path: &Path,
+    cipher: &CipherArgs,
+    passphrase_args: &PassphraseArgs,
+) -> Result<SqlCipherReader<FileSource>, Box<dyn Error>> {
+    let config = cipher.config()?;
+    check_companion_files(path)?;
+    let passphrase = read_passphrase(passphrase_args)?;
+    let source = open_encrypted_database(path)?;
+    let reader = SqlCipherReader::open(source, config, passphrase.as_slice())?;
+    drop(passphrase);
+    Ok(reader)
+}
+
 fn inspect(args: InspectArgs) -> Result<(), Box<dyn Error>> {
     let config = args.cipher.config()?;
     let metadata = fs::metadata(&args.input_path).map_err(|source| {
@@ -396,12 +405,7 @@ fn inspect(args: InspectArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn verify(args: VerifyArgs) -> Result<(), Box<dyn Error>> {
-    let config = args.cipher.config()?;
-    check_companion_files(&args.input_path)?;
-    let passphrase = read_passphrase(&args.passphrase)?;
-    let source = open_encrypted_database(&args.input_path)?;
-    let reader = SqlCipherReader::open(source, config, passphrase.as_slice())?;
-    drop(passphrase);
+    let reader = open_reader(&args.input_path, &args.cipher, &args.passphrase)?;
     let mut plaintext_page = Zeroizing::new(vec![0; reader.page_size()]);
 
     for page_no in 1..=reader.page_count() {

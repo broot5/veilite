@@ -1,4 +1,7 @@
+mod lexer;
+
 use crate::{Text, TextEncoding, Value};
+use lexer::{Token, lex};
 
 type Result<T> = std::result::Result<T, &'static str>;
 
@@ -74,144 +77,6 @@ pub(crate) struct Layout {
     pub storage: Vec<usize>,
     pub alias: Option<usize>,
     pub without_rowid: bool,
-}
-
-#[derive(Debug)]
-enum Token {
-    Word(String, bool),
-    String(String),
-    Number(String),
-    Blob(Vec<u8>),
-    Symbol(char),
-}
-impl Token {
-    fn kw(&self, expected: &str) -> bool {
-        matches!(self, Self::Word(word, false) if word.eq_ignore_ascii_case(expected))
-    }
-    fn symbol(&self, expected: char) -> bool {
-        matches!(self, Self::Symbol(c) if *c == expected)
-    }
-    fn name(&self) -> Option<&str> {
-        match self {
-            Self::Word(s, _) | Self::String(s) => Some(s),
-            _ => None,
-        }
-    }
-    fn spelling(&self) -> String {
-        match self {
-            Self::Word(s, _) | Self::String(s) | Self::Number(s) => s.clone(),
-            Self::Symbol(c) => c.to_string(),
-            Self::Blob(_) => String::new(),
-        }
-    }
-}
-
-fn lex(sql: &str) -> Result<Vec<Token>> {
-    let b = sql.as_bytes();
-    let mut i = 0;
-    let mut tokens = Vec::new();
-    while i < b.len() {
-        if b[i].is_ascii_whitespace() {
-            i += 1;
-            continue;
-        }
-        if b[i..].starts_with(b"--") {
-            while i < b.len() && b[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-        if b[i..].starts_with(b"/*") {
-            i += 2;
-            while i < b.len() && !b[i..].starts_with(b"*/") {
-                i += 1;
-            }
-            if i == b.len() {
-                return Err("unterminated SQL comment");
-            }
-            i += 2;
-            continue;
-        }
-        let blob = matches!(b[i], b'x' | b'X') && b.get(i + 1) == Some(&b'\'');
-        if blob {
-            i += 1;
-        }
-        if matches!(b[i], b'\'' | b'"' | b'`' | b'[') {
-            let quote = b[i];
-            let end = if quote == b'[' { b']' } else { quote };
-            i += 1;
-            let mut value = Vec::new();
-            loop {
-                if i == b.len() {
-                    return Err("unterminated quoted SQL token");
-                }
-                if b[i] == end {
-                    i += 1;
-                    if quote != b'[' && b.get(i) == Some(&end) {
-                        value.push(end);
-                        i += 1;
-                    } else {
-                        break;
-                    }
-                } else {
-                    value.push(b[i]);
-                    i += 1;
-                }
-            }
-            let value = String::from_utf8(value).map_err(|_| "invalid SQL text")?;
-            tokens.push(if blob {
-                if value.len() % 2 != 0 {
-                    return Err("invalid blob literal");
-                }
-                let mut out = Vec::new();
-                for pair in value.as_bytes().chunks_exact(2) {
-                    let high = (pair[0] as char)
-                        .to_digit(16)
-                        .ok_or("invalid blob literal")?;
-                    let low = (pair[1] as char)
-                        .to_digit(16)
-                        .ok_or("invalid blob literal")?;
-                    out.push((high * 16 + low) as u8);
-                }
-                Token::Blob(out)
-            } else if quote == b'\'' {
-                Token::String(value)
-            } else {
-                Token::Word(value, true)
-            });
-            continue;
-        }
-        if b[i].is_ascii_digit() || (b[i] == b'.' && b.get(i + 1).is_some_and(u8::is_ascii_digit)) {
-            let start = i;
-            i += 1;
-            while i < b.len()
-                && (b[i].is_ascii_alphanumeric()
-                    || matches!(b[i], b'.' | b'_')
-                    || (matches!(b[i], b'+' | b'-') && matches!(b[i - 1], b'e' | b'E')))
-            {
-                i += 1;
-            }
-            tokens.push(Token::Number(sql[start..i].into()));
-            continue;
-        }
-        if b[i].is_ascii_alphabetic() || b[i] == b'_' || b[i] >= 128 {
-            let start = i;
-            i += 1;
-            while i < b.len()
-                && (b[i].is_ascii_alphanumeric() || matches!(b[i], b'_' | b'$') || b[i] >= 128)
-            {
-                i += 1;
-            }
-            tokens.push(Token::Word(sql[start..i].into(), false));
-            continue;
-        }
-        if !b[i].is_ascii() {
-            return Err("invalid SQL token");
-        }
-        tokens.push(Token::Symbol(b[i] as char));
-        i += 1;
-    }
-    Ok(tokens)
 }
 
 struct Parser<'a> {
@@ -490,7 +355,7 @@ fn parse_table(sql: &str, encoding: TextEncoding) -> Result<ParsedTable> {
             if p.at != 0 {
                 return Err("unsupported named table constraint");
             }
-            let (column, primary_key) = parse_column(&mut p, strict, encoding)?;
+            let (column, primary_key) = parse_column(&mut p)?.resolve(strict, encoding)?;
             if columns
                 .iter()
                 .any(|c: &Column| c.name.eq_ignore_ascii_case(&column.name))
@@ -526,13 +391,75 @@ fn parse_table(sql: &str, encoding: TextEncoding) -> Result<ParsedTable> {
     })
 }
 
-fn parse_column(
-    p: &mut Parser<'_>,
-    strict: bool,
-    encoding: TextEncoding,
-) -> Result<(Column, Option<InlinePrimaryKey>)> {
+// Keep declaration syntax separate from affinity and column-kind resolution.
+struct ParsedColumn<'a> {
+    name: String,
+    declared_type: String,
+    constraints: Vec<ColumnConstraint<'a>>,
+}
+
+enum ColumnConstraint<'a> {
+    PrimaryKey(InlinePrimaryKey),
+    NotNull,
+    Collation(String),
+    Default(&'a [Token]),
+    StoredGenerated,
+}
+
+impl ParsedColumn<'_> {
+    fn resolve(
+        self,
+        strict: bool,
+        encoding: TextEncoding,
+    ) -> Result<(Column, Option<InlinePrimaryKey>)> {
+        let affinity = affinity(&self.declared_type, strict)?;
+        let mut column = Column {
+            name: self.name,
+            declared_type: self.declared_type,
+            kind: ColumnKind::Ordinary { default: None },
+            primary_key: None,
+            not_null: false,
+            affinity,
+            collation: "BINARY".into(),
+        };
+        let mut primary_key = None;
+        // Apply constraints in declaration order, including repeated defaults
+        // and collations. Every default must be supported even if overwritten.
+        for constraint in self.constraints {
+            match constraint {
+                ColumnConstraint::PrimaryKey(key) => {
+                    if primary_key.replace(key).is_some() {
+                        return Err("multiple primary keys");
+                    }
+                }
+                ColumnConstraint::NotNull => column.not_null = true,
+                ColumnConstraint::Collation(name) => column.collation = name,
+                ColumnConstraint::Default(tokens) => {
+                    let value = constant(tokens, affinity, encoding)?;
+                    match &mut column.kind {
+                        ColumnKind::Ordinary { default } => {
+                            *default = Some(crate::defaults::coerce(value, affinity, encoding)?);
+                        }
+                        ColumnKind::StoredGenerated => return Err("generated column with DEFAULT"),
+                    }
+                }
+                ColumnConstraint::StoredGenerated => {
+                    if column.is_stored_generated() {
+                        return Err("duplicate generated column clause");
+                    }
+                    if column.default_value().is_some() {
+                        return Err("generated column with DEFAULT");
+                    }
+                    column.kind = ColumnKind::StoredGenerated;
+                }
+            }
+        }
+        Ok((column, primary_key))
+    }
+}
+
+fn parse_column<'a>(p: &mut Parser<'a>) -> Result<ParsedColumn<'a>> {
     let definition = p.tokens;
-    let mut primary_key = None;
     let name = p.name()?;
     let start = p.at;
     while let Some(t) = definition.get(p.at) {
@@ -552,16 +479,7 @@ fn parse_column(
         .map(Token::spelling)
         .collect::<Vec<_>>()
         .join(" ");
-    let affinity = affinity(&declared_type, strict)?;
-    let mut column = Column {
-        name,
-        declared_type,
-        kind: ColumnKind::Ordinary { default: None },
-        primary_key: None,
-        not_null: false,
-        affinity,
-        collation: "BINARY".into(),
-    };
+    let mut constraints = Vec::new();
     while p.at < definition.len() {
         if p.eat("CONSTRAINT") {
             p.name()?;
@@ -570,29 +488,26 @@ fn parse_column(
             p.require("KEY")?;
             p.eat("ASC");
             let descending = p.eat("DESC");
-            if primary_key
-                .replace(InlinePrimaryKey { descending })
-                .is_some()
-            {
-                return Err("multiple primary keys");
-            }
+            constraints.push(ColumnConstraint::PrimaryKey(InlinePrimaryKey {
+                descending,
+            }));
             p.conflict()?;
             p.eat("AUTOINCREMENT");
         } else if p.eat("NOT") {
             p.require("NULL")?;
-            column.not_null = true;
+            constraints.push(ColumnConstraint::NotNull);
             p.conflict()?;
         } else if p.eat("NULL") || p.eat("UNIQUE") {
             p.conflict()?;
         } else if p.eat("CHECK") {
             p.group()?;
         } else if p.eat("COLLATE") {
-            column.collation = p.name()?;
+            constraints.push(ColumnConstraint::Collation(p.name()?));
         } else if p.eat("REFERENCES") {
             p.references()?;
         } else if p.eat("DEFAULT") {
-            let value = if p.tokens.get(p.at).is_some_and(|t| t.symbol('(')) {
-                constant(p.group()?, affinity, encoding)?
+            let tokens = if p.tokens.get(p.at).is_some_and(|t| t.symbol('(')) {
+                p.group()?
             } else {
                 let start = p.at;
                 if p.symbol('+') || p.symbol('-') { /* numeric sign */ }
@@ -600,22 +515,14 @@ fn parse_column(
                     return Err("missing DEFAULT value");
                 }
                 p.at += 1;
-                constant(&definition[start..p.at], affinity, encoding)?
+                &definition[start..p.at]
             };
-            match &mut column.kind {
-                ColumnKind::Ordinary { default } => {
-                    *default = Some(crate::defaults::coerce(value, affinity, encoding)?);
-                }
-                ColumnKind::StoredGenerated => return Err("generated column with DEFAULT"),
-            }
+            constraints.push(ColumnConstraint::Default(tokens));
         } else if p
             .tokens
             .get(p.at)
             .is_some_and(|t| t.kw("GENERATED") || t.kw("AS"))
         {
-            if column.is_stored_generated() {
-                return Err("duplicate generated column clause");
-            }
             if p.eat("GENERATED") {
                 p.require("ALWAYS")?;
             }
@@ -627,15 +534,16 @@ fn parse_column(
             if !p.eat("STORED") {
                 return Err("VIRTUAL generated columns");
             }
-            if column.default_value().is_some() {
-                return Err("generated column with DEFAULT");
-            }
-            column.kind = ColumnKind::StoredGenerated;
+            constraints.push(ColumnConstraint::StoredGenerated);
         } else {
             return Err("unsupported column constraint");
         }
     }
-    Ok((column, primary_key))
+    Ok(ParsedColumn {
+        name,
+        declared_type,
+        constraints,
+    })
 }
 
 impl ParsedTable {
