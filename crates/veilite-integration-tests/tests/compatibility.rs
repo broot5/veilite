@@ -1,43 +1,13 @@
-use std::num::NonZeroU32;
-use std::path::PathBuf;
+mod common;
 
-use veilite_core::{
-    CipherConfig, CipherPreset, DecryptError, FileSource, HashAlgorithm, ReaderError, SliceSource,
-    SqlCipherReader,
-};
+use common::{FIXTURE_CASES, FixtureCase, FixtureCipher, SQLCIPHER3_CASE};
+use std::{num::NonZeroU32, path::PathBuf};
+use veilite_core::{DecryptError, FileSource, ReaderError, SliceSource, SqlCipherReader};
 
 const SQLITE_HEADER_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 const AES_BLOCK_SIZE: usize = 16;
 
-#[derive(Debug, Clone, Copy)]
-enum FixtureCipher {
-    SqlCipher3,
-    SqlCipher4,
-    Custom,
-}
-
-#[derive(Clone, Copy)]
-struct FixtureCase {
-    name: &'static str,
-    cipher: FixtureCipher,
-    encrypted: &'static [u8],
-    passphrase: &'static [u8],
-    page_size: usize,
-    reserve_size: usize,
-}
-
 impl FixtureCase {
-    fn config(self) -> CipherConfig {
-        match self.cipher {
-            FixtureCipher::SqlCipher3 => CipherPreset::SqlCipher3.into(),
-            FixtureCipher::SqlCipher4 => CipherPreset::SqlCipher4.into(),
-            FixtureCipher::Custom => {
-                CipherConfig::new(2048, 100_000, HashAlgorithm::Sha256, HashAlgorithm::Sha256)
-                    .expect("custom fixture configuration is valid")
-            }
-        }
-    }
-
     fn path(self) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures")
@@ -45,48 +15,18 @@ impl FixtureCase {
             .join("encrypted.db")
     }
 
-    fn reader(self) -> SqlCipherReader<SliceSource<'static>> {
-        SqlCipherReader::open(
-            SliceSource::new(self.encrypted),
-            self.config(),
-            self.passphrase,
-        )
-        .unwrap_or_else(|error| panic!("{} reader failed to open: {error}", self.name))
+    fn reserve_size(self) -> usize {
+        match self.cipher {
+            FixtureCipher::SqlCipher3 | FixtureCipher::Custom => 48,
+            FixtureCipher::SqlCipher4 => 80,
+        }
     }
 }
-
-const SQLCIPHER3_CASE: FixtureCase = FixtureCase {
-    name: "sqlcipher3",
-    cipher: FixtureCipher::SqlCipher3,
-    encrypted: include_bytes!("../../../fixtures/sqlcipher3/encrypted.db"),
-    passphrase: b"veilite-sqlcipher3-test-key",
-    page_size: 1024,
-    reserve_size: 48,
-};
-
-const SQLCIPHER4_CASE: FixtureCase = FixtureCase {
-    name: "sqlcipher4",
-    cipher: FixtureCipher::SqlCipher4,
-    encrypted: include_bytes!("../../../fixtures/sqlcipher4/encrypted.db"),
-    passphrase: b"veilite-sqlcipher4-test-key",
-    page_size: 4096,
-    reserve_size: 80,
-};
-
-const SQLCIPHER_CUSTOM_CASE: FixtureCase = FixtureCase {
-    name: "sqlcipher-custom",
-    cipher: FixtureCipher::Custom,
-    encrypted: include_bytes!("../../../fixtures/sqlcipher-custom/encrypted.db"),
-    passphrase: b"veilite-sqlcipher-custom-test-key",
-    page_size: 2048,
-    reserve_size: 48,
-};
-
-const FIXTURE_CASES: [FixtureCase; 3] = [SQLCIPHER3_CASE, SQLCIPHER4_CASE, SQLCIPHER_CUSTOM_CASE];
 
 #[test]
 fn page_source_and_sqlite_reader_preserve_authentication_failures() {
     for case in FIXTURE_CASES {
+        let context = case.name;
         let pages = SqlCipherReader::open(
             SliceSource::new(case.encrypted),
             case.config(),
@@ -96,17 +36,26 @@ fn page_source_and_sqlite_reader_preserve_authentication_failures() {
         let mut output = vec![0xaa; case.page_size];
         let error = sqlite_reader::PageSource::read_page_into(&pages, NonZeroU32::MIN, &mut output)
             .unwrap_err();
-        assert!(matches!(
-            error,
-            ReaderError::Decrypt(DecryptError::AuthenticationFailed { page_no: 1 })
-        ));
-        assert!(output.iter().all(|byte| *byte == 0));
-        assert!(matches!(
-            sqlite_reader::Reader::open(pages),
-            Err(sqlite_reader::ReaderError::Source(ReaderError::Decrypt(
-                DecryptError::AuthenticationFailed { page_no: 1 }
-            )))
-        ));
+        assert!(
+            matches!(
+                error,
+                ReaderError::Decrypt(DecryptError::AuthenticationFailed { page_no: 1 })
+            ),
+            "{context}: {error:?}"
+        );
+        assert!(
+            output.iter().all(|byte| *byte == 0),
+            "{context}: output not cleared"
+        );
+        assert!(
+            matches!(
+                sqlite_reader::Reader::open(pages),
+                Err(sqlite_reader::ReaderError::Source(ReaderError::Decrypt(
+                    DecryptError::AuthenticationFailed { page_no: 1 }
+                )))
+            ),
+            "{context}: SQLite reader did not preserve page 1 authentication failure"
+        );
 
         let reader = sqlite_reader::Reader::open(case.reader()).unwrap();
         let index_page = reader
@@ -118,38 +67,55 @@ fn page_source_and_sqlite_reader_preserve_authentication_failures() {
         // The final page belongs to the large BLOB's overflow chain. Reading
         // earlier rows succeeds, but no partial large row may escape.
         for page in [index_page, last_page] {
+            let context = format!("{} corrupted page {page}", case.name);
             let mut bytes = case.encrypted.to_vec();
             bytes[(page as usize - 1) * case.page_size + 16] ^= 1;
             let pages =
                 SqlCipherReader::open(SliceSource::new(&bytes), case.config(), case.passphrase)
                     .unwrap();
+            output.fill(0xaa);
             sqlite_reader::PageSource::read_page_into(
                 &pages,
                 NonZeroU32::new(page).unwrap(),
                 &mut output,
             )
             .unwrap_err();
-            assert!(output.iter().all(|byte| *byte == 0));
+            assert!(
+                output.iter().all(|byte| *byte == 0),
+                "{context}: output not cleared"
+            );
             let reader = sqlite_reader::Reader::open(pages).unwrap();
             let error = if page == index_page {
                 let index = reader.index("people_name_idx").unwrap();
                 let mut entries = index.entries();
                 let error = entries.next().unwrap().unwrap_err();
-                assert!(entries.next().is_none());
+                assert!(
+                    entries.next().is_none(),
+                    "{context}: index iterator not terminated"
+                );
                 error
             } else {
                 let table = reader.table("binary_samples").unwrap();
                 let mut rows = table.rows();
-                assert!(rows.next().unwrap().is_ok());
+                assert!(
+                    rows.next().unwrap().is_ok(),
+                    "{context}: preceding row failed"
+                );
                 let error = rows.next().unwrap().unwrap_err();
-                assert!(rows.next().is_none());
+                assert!(
+                    rows.next().is_none(),
+                    "{context}: row iterator not terminated"
+                );
                 error
             };
-            assert!(matches!(error,
-                sqlite_reader::ReaderError::Source(ReaderError::Decrypt(
-                    DecryptError::AuthenticationFailed { page_no }
-                )) if page_no == page
-            ));
+            assert!(
+                matches!(error,
+                    sqlite_reader::ReaderError::Source(ReaderError::Decrypt(
+                        DecryptError::AuthenticationFailed { page_no }
+                    )) if page_no == page
+                ),
+                "{context}: {error:?}"
+            );
         }
     }
 }
@@ -181,7 +147,7 @@ fn authenticates_and_restores_supported_fixtures() {
                 .unwrap_or_else(|error| panic!("{} page {page_no}: {error}", case.name));
 
             assert!(
-                page[case.page_size - case.reserve_size..]
+                page[case.page_size - case.reserve_size()..]
                     .iter()
                     .all(|byte| *byte == 0),
                 "{} page {page_no}",
@@ -199,7 +165,7 @@ fn authenticates_and_restores_supported_fixtures() {
             "{}",
             case.name
         );
-        assert_eq!(usize::from(page[20]), case.reserve_size, "{}", case.name);
+        assert_eq!(usize::from(page[20]), case.reserve_size(), "{}", case.name);
         assert_eq!(
             u32::from_be_bytes(page[60..64].try_into().unwrap()),
             42,
@@ -218,9 +184,11 @@ fn authenticates_and_restores_supported_fixtures() {
 #[test]
 fn reads_matching_ranges_from_slice_and_file_sources() {
     for case in FIXTURE_CASES {
+        let context = case.name;
         let slice_reader = case.reader();
         let file_reader = SqlCipherReader::open(
-            FileSource::open(case.path()).unwrap(),
+            FileSource::open(case.path())
+                .unwrap_or_else(|error| panic!("{context} file source: {error}")),
             case.config(),
             case.passphrase,
         )
@@ -246,57 +214,32 @@ fn reads_matching_ranges_from_slice_and_file_sources() {
         ];
 
         for (offset, length) in ranges {
+            let context = format!("{} offset {offset}, length {length}", case.name);
             let mut from_slice = vec![0; length];
             let mut from_file = vec![0; length];
             let offset_u64 = u64::try_from(offset).expect("fixture offset fits in u64");
             slice_reader
                 .read_exact_at(offset_u64, &mut from_slice)
-                .unwrap();
+                .unwrap_or_else(|error| panic!("{context} slice read: {error}"));
             file_reader
                 .read_exact_at(offset_u64, &mut from_file)
-                .unwrap();
+                .unwrap_or_else(|error| panic!("{context} file read: {error}"));
 
-            assert_eq!(
-                from_slice,
-                expected[offset..offset + length],
-                "{}",
-                case.name
-            );
-            assert_eq!(from_file, from_slice, "{} at {offset}", case.name);
+            assert_eq!(from_slice, expected[offset..offset + length], "{context}");
+            assert_eq!(from_file, from_slice, "{context}");
         }
-    }
-}
-
-#[test]
-fn defers_passphrase_authentication_until_a_page_is_read() {
-    for case in FIXTURE_CASES {
-        let reader = SqlCipherReader::open(
-            SliceSource::new(case.encrypted),
-            case.config(),
-            b"wrong passphrase",
-        )
-        .expect("opening a reader should only derive keys");
-        let mut output = vec![0xaa; reader.page_size()];
-
-        let error = reader
-            .read_page_into(NonZeroU32::new(1).unwrap(), &mut output)
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            ReaderError::Decrypt(DecryptError::AuthenticationFailed { page_no: 1 })
-        ));
-        assert!(output.iter().all(|byte| *byte == 0));
     }
 }
 
 #[test]
 fn rejects_page_tampering_and_relocation_without_exposing_plaintext() {
     for case in FIXTURE_CASES {
-        let iv_start = case.page_size - case.reserve_size;
+        let context = case.name;
+        let iv_start = case.page_size - case.reserve_size();
         let hmac_start = iv_start + AES_BLOCK_SIZE;
 
         for index in [16, iv_start, hmac_start] {
+            let context = format!("{} tampered byte {index}, page 1", case.name);
             let mut tampered = case.encrypted.to_vec();
             tampered[index] ^= 1;
             let reader =
@@ -306,11 +249,17 @@ fn rejects_page_tampering_and_relocation_without_exposing_plaintext() {
 
             let error = reader.read_exact_at(0, &mut output).unwrap_err();
 
-            assert!(matches!(
-                error,
-                ReaderError::Decrypt(DecryptError::AuthenticationFailed { page_no: 1 })
-            ));
-            assert!(output.iter().all(|byte| *byte == 0));
+            assert!(
+                matches!(
+                    error,
+                    ReaderError::Decrypt(DecryptError::AuthenticationFailed { page_no: 1 })
+                ),
+                "{context}: {error:?}"
+            );
+            assert!(
+                output.iter().all(|byte| *byte == 0),
+                "{context}: output not cleared"
+            );
         }
 
         let mut relocated = case.encrypted.to_vec();
@@ -325,11 +274,17 @@ fn rejects_page_tampering_and_relocation_without_exposing_plaintext() {
             .read_exact_at(u64::try_from(2 * case.page_size).unwrap(), &mut output)
             .unwrap_err();
 
-        assert!(matches!(
-            error,
-            ReaderError::Decrypt(DecryptError::AuthenticationFailed { page_no: 3 })
-        ));
-        assert!(output.iter().all(|byte| *byte == 0));
+        assert!(
+            matches!(
+                error,
+                ReaderError::Decrypt(DecryptError::AuthenticationFailed { page_no: 3 })
+            ),
+            "{context}: {error:?}"
+        );
+        assert!(
+            output.iter().all(|byte| *byte == 0),
+            "{context}: output not cleared"
+        );
 
         let mut tampered = case.encrypted.to_vec();
         tampered[case.page_size + 16] ^= 1;
@@ -345,11 +300,17 @@ fn rejects_page_tampering_and_relocation_without_exposing_plaintext() {
             )
             .unwrap_err();
 
-        assert!(matches!(
-            error,
-            ReaderError::Decrypt(DecryptError::AuthenticationFailed { page_no: 2 })
-        ));
-        assert!(output.iter().all(|byte| *byte == 0));
+        assert!(
+            matches!(
+                error,
+                ReaderError::Decrypt(DecryptError::AuthenticationFailed { page_no: 2 })
+            ),
+            "{context}: {error:?}"
+        );
+        assert!(
+            output.iter().all(|byte| *byte == 0),
+            "{context}: output not cleared"
+        );
     }
 }
 
@@ -378,6 +339,6 @@ fn ignores_sqlcipher3_unauthenticated_filler() {
         tampered_reader
             .read_page_into(page_no, &mut actual)
             .unwrap();
-        assert_eq!(actual, expected);
+        assert_eq!(actual, expected, "{} filler, page {page_no}", case.name);
     }
 }

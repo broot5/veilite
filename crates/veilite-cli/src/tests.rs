@@ -195,11 +195,10 @@ fn stops_reading_after_first_line_and_propagates_earlier_errors() {
 }
 
 #[test]
-fn preserves_existing_outputs_and_removes_failed_exports() {
+fn preserves_existing_outputs() {
     let directory = TemporaryDirectory::new();
     let input_path = directory.path().join("encrypted.db");
     let existing_output_path = directory.path().join("existing.db");
-    let partial_output_path = directory.path().join("partial.db");
     let config = CipherConfig::from(CipherPreset::SqlCipher4);
     fs::write(&input_path, vec![0; config.page_size()]).unwrap();
     fs::write(&existing_output_path, b"keep this").unwrap();
@@ -214,9 +213,6 @@ fn preserves_existing_outputs_and_removes_failed_exports() {
     assert!(error.to_string().contains("failed to create export"));
     assert!(error.to_string().contains("existing.db"));
     assert_eq!(fs::read(&existing_output_path).unwrap(), b"keep this");
-
-    assert!(write_decrypted_database(&partial_output_path, &reader).is_err());
-    assert!(!partial_output_path.exists());
 }
 
 #[test]

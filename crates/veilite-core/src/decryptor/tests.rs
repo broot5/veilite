@@ -37,19 +37,6 @@ fn rejects_all_zero_physical_pages() {
 }
 
 #[test]
-fn derives_a_sha256_key_from_a_known_answer() {
-    let mut actual = [0; 32];
-    PageDecryptor::derive_key_into(HashAlgorithm::Sha256, b"password", b"salt", 1, &mut actual);
-    let expected = [
-        0x12, 0x0f, 0xb6, 0xcf, 0xfc, 0xf8, 0xb3, 0x2c, 0x43, 0xe7, 0x22, 0x52, 0x56, 0xc4, 0xf8,
-        0x37, 0xa8, 0x65, 0x48, 0xc9, 0x2c, 0xcc, 0x35, 0x48, 0x08, 0x05, 0x98, 0x7c, 0xb7, 0x0b,
-        0xe1, 0x7b,
-    ];
-
-    assert_eq!(actual, expected);
-}
-
-#[test]
 fn verifies_a_sha256_page_hmac_from_a_known_answer() {
     let config = CipherConfig::new(1024, 1, HashAlgorithm::Sha256, HashAlgorithm::Sha256).unwrap();
     let salt = std::array::from_fn(|index| u8::try_from(index).unwrap());

@@ -5,6 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[[bin]]
+name = "veilite-test-cli"
+path = "src/cli.rs"
+test = false
+bench = false
+
+[dependencies]
+clap.workspace = true
+rpassword.workspace = true
+veilite-core.workspace = true
+zeroize.workspace = true
+
 [dev-dependencies]
 sqlite-reader.workspace = true
-veilite-core.workspace = true

@@ -439,8 +439,11 @@ dependencies = [
 name = "veilite-integration-tests"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "rpassword",
  "sqlite-reader",
  "veilite-core",
+ "zeroize",
 ]
 
 [[package]]
