@@ -66,7 +66,7 @@ fn reserved_bytes_are_excluded_from_cells_and_overflow() {
     leaf[420..423].copy_from_slice(&[0x87, 0x6d, 7]); // payload length, rowid
     leaf[423..476].copy_from_slice(&record[..53]);
     leaf[476..480].copy_from_slice(&3u32.to_be_bytes());
-    for (part, next) in record[53..].chunks_exact(476).zip([4u32, 0]) {
+    for (part, next) in record[53..].as_chunks::<476>().0.iter().zip([4u32, 0]) {
         let mut overflow = vec![0; 512];
         overflow[..4].copy_from_slice(&next.to_be_bytes());
         overflow[4..480].copy_from_slice(part);

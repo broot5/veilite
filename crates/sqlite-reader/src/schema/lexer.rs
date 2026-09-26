@@ -88,7 +88,7 @@ pub(super) fn lex(sql: &str) -> Result<Vec<Token>> {
                     return Err("invalid blob literal");
                 }
                 let mut out = Vec::new();
-                for pair in value.as_bytes().chunks_exact(2) {
+                for pair in value.as_bytes().as_chunks::<2>().0 {
                     let high = (pair[0] as char)
                         .to_digit(16)
                         .ok_or("invalid blob literal")?;

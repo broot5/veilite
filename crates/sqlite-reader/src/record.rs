@@ -40,10 +40,15 @@ impl Text {
                 if !self.bytes.len().is_multiple_of(2) {
                     return Err(TextError);
                 }
-                let units = self.bytes.chunks_exact(2).map(|b| match encoding {
-                    TextEncoding::Utf16Le => u16::from_le_bytes([b[0], b[1]]),
-                    _ => u16::from_be_bytes([b[0], b[1]]),
-                });
+                let units = self
+                    .bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|b| match encoding {
+                        TextEncoding::Utf16Le => u16::from_le_bytes(*b),
+                        _ => u16::from_be_bytes(*b),
+                    });
                 char::decode_utf16(units)
                     .map(|c| c.map_err(|_| TextError))
                     .collect()
