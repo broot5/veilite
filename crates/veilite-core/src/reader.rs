@@ -306,6 +306,24 @@ impl<R: ReadAt> SqlCipherReader<R> {
     }
 }
 
+// A complete, checkpointed main image supplies the snapshot's physical pages.
+// Keep authentication and failure-buffer clearing in the existing page reader.
+impl<R: ReadAt> sqlite_source::PageSource for SqlCipherReader<R> {
+    type Error = ReaderError<R::Error>;
+
+    fn page_size(&self) -> usize {
+        self.page_size()
+    }
+
+    fn page_count(&self) -> u32 {
+        self.page_count()
+    }
+
+    fn read_page_into(&self, page: NonZeroU32, output: &mut [u8]) -> Result<(), Self::Error> {
+        self.read_page_into(page, output)
+    }
+}
+
 fn page_number_from_index(index: u64) -> Option<NonZeroU32> {
     index
         .checked_add(1)
