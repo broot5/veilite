@@ -629,6 +629,43 @@ fn quoted_ddl_and_combined_table_options_match_logical_values() {
 }
 
 #[test]
+fn quoted_defaults_and_wrapped_keys_match_sqlite() {
+    let expected = include_str!("fixtures/reader-grammar.expected");
+    for bytes in [UTF8, LE, BE] {
+        let reader = Reader::open(Pages::new(bytes)).unwrap();
+        let mut actual = String::new();
+        for name in ["quoted_defaults", "wrapped_alias", "wrapped_keys"] {
+            let table = reader.table(name).unwrap();
+            for row in table.rows() {
+                let row = row.unwrap();
+                if name == "wrapped_alias" {
+                    actual.push_str(&format!("{}|", row.rowid().unwrap()));
+                }
+                let values: Vec<_> = row
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Value::Integer(n) => n.to_string(),
+                        Value::Text(t) => t.to_string().unwrap(),
+                        other => panic!("unexpected grammar fixture value: {other:?}"),
+                    })
+                    .collect();
+                actual.push_str(&values.join("|"));
+                actual.push('\n');
+            }
+        }
+        for column in reader.table("wrapped_keys").unwrap().columns() {
+            actual.push_str(&format!(
+                "{}|{}\n",
+                column.name(),
+                column.primary_key_position().unwrap_or(0)
+            ));
+        }
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
 fn constant_defaults_match_logical_values() {
     for bytes in [UTF8, LE, BE] {
         let reader = Reader::open(Pages::new(bytes)).unwrap();

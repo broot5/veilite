@@ -17,6 +17,9 @@ leaves and reserved-byte overflow cases in memory.
 `.expected` files contain SQLite query results. `decimal.tsv` records decimal
 inputs and binary64 bits; `reader-utf8.overflow` identifies a fault-injection page.
 Numeric expectations apply to the pinned SQLite build.
+`reader-grammar.expected` compares quoted defaults before and after insertion,
+parenthesized rowid aliases, and nested key collations in all three encodings.
+The generator checks that all three encodings produce the same grammar results.
 
 ## Regenerate
 

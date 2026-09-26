@@ -231,19 +231,33 @@ fn keys(tokens: &[Token]) -> Result<Vec<KeyTerm>> {
     split(tokens)?
         .into_iter()
         .map(|part| {
-            let mut p = Parser::new(part);
-            let name = p.name()?;
-            let collation = if p.eat("COLLATE") {
-                Some(p.name()?)
-            } else {
-                None
-            };
-            p.eat("ASC");
-            p.eat("DESC");
-            if p.at != part.len() {
-                return Err("indexed expressions are unsupported in table constraints");
+            let mut part = part;
+            let mut collation = None;
+            let mut outer = true;
+            loop {
+                let mut p = Parser::new(part);
+                let (name, inner) = if part.first().is_some_and(|t| t.symbol('(')) {
+                    (None, Some(p.group()?))
+                } else {
+                    (Some(p.name()?), None)
+                };
+                if p.eat("COLLATE") {
+                    let name = p.name()?;
+                    // An outer COLLATE overrides the one inside parentheses.
+                    collation.get_or_insert(name);
+                }
+                if outer && !p.eat("ASC") {
+                    p.eat("DESC");
+                }
+                if p.at != part.len() {
+                    return Err("indexed expressions are unsupported in table constraints");
+                }
+                if let Some(name) = name {
+                    return Ok(KeyTerm { name, collation });
+                }
+                part = inner.ok_or("expected SQL identifier")?;
+                outer = false;
             }
-            Ok(KeyTerm { name, collation })
         })
         .collect()
 }
@@ -507,7 +521,9 @@ fn parse_column<'a>(p: &mut Parser<'a>) -> Result<ParsedColumn<'a>> {
             p.references()?;
         } else if p.eat("DEFAULT") {
             let tokens = if p.tokens.get(p.at).is_some_and(|t| t.symbol('(')) {
-                p.group()?
+                let start = p.at;
+                p.group()?;
+                &definition[start..p.at]
             } else {
                 let start = p.at;
                 if p.symbol('+') || p.symbol('-') { /* numeric sign */ }
@@ -650,6 +666,11 @@ fn affinity(name: &str, strict: bool) -> Result<Affinity> {
 }
 
 fn constant(mut tokens: &[Token], affinity: Affinity, encoding: TextEncoding) -> Result<Value> {
+    // SQLite accepts quoted identifiers as string literals only in the bare
+    // DEFAULT form, not inside a parenthesized expression.
+    if let [Token::Word(s, true)] = tokens {
+        return Ok(Value::Text(Text::encode(s, encoding)));
+    }
     while tokens.first().is_some_and(|t| t.symbol('(')) {
         let mut p = Parser::new(tokens);
         let inner = p.group()?;
@@ -675,6 +696,18 @@ fn constant(mut tokens: &[Token], affinity: Affinity, encoding: TextEncoding) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrapped_keys_do_not_enable_expression_keys() {
+        for key in ["a+1", "(a+1)", "lower(a)", "((a),b)", "(a DESC)"] {
+            let sql = format!("CREATE TABLE t(a,b,PRIMARY KEY({key}))");
+            assert!(parse(&sql, TextEncoding::Utf8).is_err(), "{key}");
+        }
+        for default in ["(\"hello\")", "([hello])", "(`hello`)", "(hello)"] {
+            let sql = format!("CREATE TABLE t(a DEFAULT {default})");
+            assert!(parse(&sql, TextEncoding::Utf8).is_err(), "{default}");
+        }
+    }
 
     #[test]
     fn rejects_invalid_stored_generated_declarations() {

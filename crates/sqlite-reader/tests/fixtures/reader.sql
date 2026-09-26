@@ -161,3 +161,21 @@ INSERT INTO stored_strict(id) VALUES(4);
 CREATE TABLE virtual_explicit(a, b AS (a+1) VIRTUAL);
 CREATE TABLE virtual_implicit(a, b AS (a+1));
 CREATE TABLE mixed_generated(a, b AS (a+1) STORED, c AS (a+2) VIRTUAL);
+
+-- Bare quoted defaults and parenthesized column references are SQLite grammar.
+CREATE TABLE quoted_defaults(id INTEGER PRIMARY KEY);
+INSERT INTO quoted_defaults VALUES(1);
+ALTER TABLE quoted_defaults ADD COLUMN dq TEXT DEFAULT "한""글";
+ALTER TABLE quoted_defaults ADD COLUMN bracket TEXT DEFAULT [hello];
+ALTER TABLE quoted_defaults ADD COLUMN tick TEXT DEFAULT `a``b`;
+ALTER TABLE quoted_defaults ADD COLUMN numeric NUMERIC DEFAULT "3.0e+5";
+ALTER TABLE quoted_defaults ADD COLUMN keyword TEXT DEFAULT "TRUE";
+INSERT INTO quoted_defaults(id) VALUES(2);
+
+CREATE TABLE wrapped_alias(id INTEGER, value TEXT, PRIMARY KEY(((id)) DESC));
+INSERT INTO wrapped_alias(value) VALUES('alias');
+CREATE TABLE wrapped_keys(
+    payload TEXT, a TEXT, b INTEGER,
+    PRIMARY KEY(((a) COLLATE NOCASE) COLLATE BINARY, (a) COLLATE NOCASE, ((b)) DESC)
+) WITHOUT ROWID;
+INSERT INTO wrapped_keys VALUES('payload', 'Ab', 7);

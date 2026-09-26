@@ -73,6 +73,7 @@ def query(database, sql):
 
 
 numeric_expected = None
+grammar_expected = None
 for name, size, encoding, script in [
     ('header-utf8', 512, 'UTF-8', 'header.sql'),
     ('header-utf16le', 4096, 'UTF-16le', 'header.sql'),
@@ -115,6 +116,14 @@ for name, size, encoding, script in [
         (root / f'{name}.expected').write_text(query(database, sql))
         sql = 'SELECT ' + ','.join(f'hex({col})' for col in 'abcdefghijklmnopqr') + ' FROM real_text_defaults ORDER BY id;'
         (root / f'{name}.real-defaults.expected').write_text(query(database, sql))
+        sql = """SELECT id,dq,bracket,tick,numeric,keyword FROM quoted_defaults ORDER BY id;
+            SELECT rowid,id,value FROM wrapped_alias;
+            SELECT payload,a,b FROM wrapped_keys;
+            SELECT name,pk FROM pragma_table_info('wrapped_keys');"""
+        expected = query(database, sql)
+        if grammar_expected is not None and expected != grammar_expected:
+            raise RuntimeError(f'Grammar results differ for {encoding}')
+        grammar_expected = expected
         if name == 'reader-utf8':
             # Locate fault injection independently of the reader's overflow code.
             sql = "SELECT pageno FROM dbstat WHERE name='People' AND pagetype='overflow' ORDER BY pageno LIMIT 1;"
@@ -132,6 +141,7 @@ for name, size, encoding, script in [
                 SELECT name,pk FROM pragma_table_info('same_key');"""
             (root / 'reader-ddl.expected').write_text(query(database, sql))
 (root / 'reader-numeric.expected').write_text(numeric_expected)
+(root / 'reader-grammar.expected').write_text(grammar_expected)
 
 
 # A larger independent oracle for decimal parsing, including the significand
