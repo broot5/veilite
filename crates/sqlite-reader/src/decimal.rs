@@ -1,4 +1,4 @@
-//! Decimal parsing with SQLite 3.53.4 sqlite3AtoF significand retention.
+//! Decimal parsing with SQLite 3.54.0 sqlite3AtoF significand retention.
 
 /// Parses a complete ASCII decimal, without whitespace or SQL separators.
 pub(crate) fn parse(text: &str) -> Option<f64> {
@@ -62,7 +62,7 @@ pub(crate) fn parse(text: &str) -> Option<f64> {
         return Some(if negative { -0.0 } else { 0.0 });
     }
     exponent += shift;
-    // SQLite 3.53.4 converts the retained u64 significand times 10^exponent
+    // SQLite 3.54.0 converts the retained u64 significand times 10^exponent
     // to the nearest binary64. Parse only that bounded decimal, not the input:
     // digits discarded above must not influence rounding.
     let value = format!("{significand}e{exponent}").parse::<f64>().ok()?;

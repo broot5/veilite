@@ -81,7 +81,8 @@ pub(crate) fn coerce(value: Value, affinity: Affinity, encoding: TextEncoding) -
         (Affinity::Text, Value::Integer(n)) => Value::Text(Text::encode(&n.to_string(), encoding)),
         (Affinity::Integer | Affinity::Numeric | Affinity::Real, Value::Text(text)) => {
             let s = text.to_string().map_err(|_| "invalid default text")?;
-            let s = s.trim_matches(|c: char| c.is_ascii_whitespace());
+            // SQLite numeric conversion also treats vertical tab as whitespace.
+            let s = s.trim_matches(|c: char| c.is_ascii_whitespace() || c == '\u{b}');
             number(s).unwrap_or(Value::Text(text))
         }
         (_, value) => value,

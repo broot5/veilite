@@ -29,13 +29,33 @@ From this directory, run:
 python3 generate.py
 ```
 
-Both `sqlite3` on PATH and Python’s `sqlite3` binding must use SQLite 3.53.4
+Both `sqlite3` on PATH and Python’s `sqlite3` binding must use SQLite 3.54.0
 with this source ID:
 
 ```text
-2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc
+2026-10-09 15:46:58 be8d059e9a49089ab2dce5ed26dd87aaf598fdc5fbe0b107c0dd758464bcd5e3
 ```
 
-The script checks the versions, loads the three SQL files, adds numeric cases,
+The script checks the versions, loads the SQL files, adds numeric cases,
 and regenerates the databases and expected results. Each database must pass
 `PRAGMA integrity_check`. Review the generated diff before committing.
+
+## Schema and default-value tests
+
+All three reader databases execute the same `reader.sql`. The generator compares
+SQLite results across encodings and writes one shared `reader-ddl.expected`.
+Each line identifies its table and record kind:
+
+```text
+table|column|name|declared type|not null|primary key position
+table|row|rowid|value|...
+```
+
+Values use `N` for NULL, `I` for integers, `R` for binary64 bits in hex, and `T`
+for UTF-8 text bytes in hex. A missing rowid is `N`. Rust tests select complete
+lines by table name and compare metadata, types, and values with this output.
+`@VT@` in the SQL source denotes a literal vertical tab inserted by the generator.
+Cases cover numeric whitespace, identifier defaults, CHECK conflict clauses,
+quoted types, repeated keys, and rowid aliases. Rows inserted before and after
+ADD COLUMN exercise both missing defaults and stored values. Unsupported
+expression defaults are checked separately in the schema tests.

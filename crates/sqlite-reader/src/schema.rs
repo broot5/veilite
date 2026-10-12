@@ -1,7 +1,7 @@
 mod lexer;
 
 use crate::{Text, TextEncoding, Value};
-use lexer::{Token, lex};
+use lexer::{Token, TokenKind, lex};
 
 type Result<T> = std::result::Result<T, &'static str>;
 
@@ -10,6 +10,7 @@ type Result<T> = std::result::Result<T, &'static str>;
 pub struct Column {
     pub(crate) name: String,
     pub(crate) declared_type: String,
+    integer_type: bool,
     kind: ColumnKind,
     pub(crate) primary_key: Option<usize>,
     pub(crate) not_null: bool,
@@ -28,7 +29,7 @@ impl Column {
     pub fn name(&self) -> &str {
         &self.name
     }
-    /// Declared type, with whitespace normalized by the schema parser.
+    /// Declared type, preserving SQLite's dequoting and internal whitespace.
     pub fn declared_type(&self) -> &str {
         &self.declared_type
     }
@@ -360,6 +361,7 @@ fn parse_table(sql: &str, encoding: TextEncoding) -> Result<ParsedTable> {
             p.conflict()?;
         } else if p.eat("CHECK") {
             p.group()?;
+            p.conflict()?;
         } else if p.eat("FOREIGN") {
             p.require("KEY")?;
             names(p.group()?)?;
@@ -369,7 +371,7 @@ fn parse_table(sql: &str, encoding: TextEncoding) -> Result<ParsedTable> {
             if p.at != 0 {
                 return Err("unsupported named table constraint");
             }
-            let (column, primary_key) = parse_column(&mut p)?.resolve(strict, encoding)?;
+            let (column, primary_key) = parse_column(&mut p, sql)?.resolve(strict, encoding)?;
             if columns
                 .iter()
                 .any(|c: &Column| c.name.eq_ignore_ascii_case(&column.name))
@@ -409,6 +411,7 @@ fn parse_table(sql: &str, encoding: TextEncoding) -> Result<ParsedTable> {
 struct ParsedColumn<'a> {
     name: String,
     declared_type: String,
+    single_type_token: bool,
     constraints: Vec<ColumnConstraint<'a>>,
 }
 
@@ -426,9 +429,14 @@ impl ParsedColumn<'_> {
         strict: bool,
         encoding: TextEncoding,
     ) -> Result<(Column, Option<InlinePrimaryKey>)> {
+        if strict && !self.single_type_token {
+            return Err("unsupported STRICT column type");
+        }
         let affinity = affinity(&self.declared_type, strict)?;
         let mut column = Column {
             name: self.name,
+            integer_type: self.single_type_token
+                && self.declared_type.eq_ignore_ascii_case("INTEGER"),
             declared_type: self.declared_type,
             kind: ColumnKind::Ordinary { default: None },
             primary_key: None,
@@ -472,7 +480,7 @@ impl ParsedColumn<'_> {
     }
 }
 
-fn parse_column<'a>(p: &mut Parser<'a>) -> Result<ParsedColumn<'a>> {
+fn parse_column<'a>(p: &mut Parser<'a>, sql: &str) -> Result<ParsedColumn<'a>> {
     let definition = p.tokens;
     let name = p.name()?;
     let start = p.at;
@@ -488,11 +496,24 @@ fn parse_column<'a>(p: &mut Parser<'a>) -> Result<ParsedColumn<'a>> {
             return Err("unsupported declared type");
         }
     }
-    let declared_type = definition[start..p.at]
-        .iter()
-        .map(Token::spelling)
-        .collect::<Vec<_>>()
-        .join(" ");
+    let type_tokens = &definition[start..p.at];
+    let single_type_token = type_tokens.len() == 1;
+    let declared_type = match (type_tokens.first(), type_tokens.last()) {
+        (Some(first), Some(last)) => {
+            let raw = &sql[first.span.start..last.span.end];
+            match &first.kind {
+                // SQLite dequotes the entire type span. Quotes terminate at the
+                // first closing quote; brackets instead strip the two end bytes.
+                TokenKind::Word(_, true) if raw.starts_with('[') => raw
+                    .get(1..raw.len() - 1)
+                    .ok_or("invalid bracketed declared type")?
+                    .to_owned(),
+                TokenKind::Word(name, true) | TokenKind::String(name) => name.clone(),
+                _ => raw.to_owned(),
+            }
+        }
+        _ => String::new(),
+    };
     let mut constraints = Vec::new();
     while p.at < definition.len() {
         if p.eat("CONSTRAINT") {
@@ -558,6 +579,7 @@ fn parse_column<'a>(p: &mut Parser<'a>) -> Result<ParsedColumn<'a>> {
     Ok(ParsedColumn {
         name,
         declared_type,
+        single_type_token,
         constraints,
     })
 }
@@ -616,10 +638,8 @@ impl ParsedTable {
         }
         let alias = if !without_rowid && declared_key_count == 1 {
             columns.iter().enumerate().find_map(|(index, column)| {
-                (column.primary_key.is_some()
-                    && column.declared_type.eq_ignore_ascii_case("INTEGER")
-                    && inline_desc != Some(index))
-                .then_some(index)
+                (column.primary_key.is_some() && column.integer_type && inline_desc != Some(index))
+                    .then_some(index)
             })
         } else {
             None
@@ -666,9 +686,22 @@ fn affinity(name: &str, strict: bool) -> Result<Affinity> {
 }
 
 fn constant(mut tokens: &[Token], affinity: Affinity, encoding: TextEncoding) -> Result<Value> {
-    // SQLite accepts quoted identifiers as string literals only in the bare
-    // DEFAULT form, not inside a parenthesized expression.
-    if let [Token::Word(s, true)] = tokens {
+    // Bare DEFAULT identifiers are string constants, except SQL literals and
+    // CURRENT_* expressions. Parenthesized identifiers remain unsupported.
+    if let [token] = tokens
+        && let TokenKind::Word(s, quoted) = &token.kind
+        && (*quoted
+            || ![
+                "NULL",
+                "TRUE",
+                "FALSE",
+                "CURRENT_DATE",
+                "CURRENT_TIME",
+                "CURRENT_TIMESTAMP",
+            ]
+            .iter()
+            .any(|keyword| token.kw(keyword)))
+    {
         return Ok(Value::Text(Text::encode(s, encoding)));
     }
     while tokens.first().is_some_and(|t| t.symbol('(')) {
@@ -680,15 +713,21 @@ fn constant(mut tokens: &[Token], affinity: Affinity, encoding: TextEncoding) ->
         tokens = inner;
     }
     match tokens {
-        [Token::String(s)] => Ok(Value::Text(Text::encode(s, encoding))),
-        [Token::Blob(b)] => Ok(Value::Blob(b.clone())),
-        [token] if token.kw("NULL") => Ok(Value::Null),
-        [token] if token.kw("TRUE") => Ok(Value::Integer(1)),
-        [token] if token.kw("FALSE") => Ok(Value::Integer(0)),
-        [Token::Number(n)] => crate::defaults::number_literal(n, affinity, encoding),
-        [Token::Symbol(sign), Token::Number(n)] if matches!(sign, '+' | '-') => {
-            crate::defaults::number_literal(&format!("{sign}{n}"), affinity, encoding)
-        }
+        [token] => match &token.kind {
+            TokenKind::String(s) => Ok(Value::Text(Text::encode(s, encoding))),
+            TokenKind::Blob(b) => Ok(Value::Blob(b.clone())),
+            _ if token.kw("NULL") => Ok(Value::Null),
+            _ if token.kw("TRUE") => Ok(Value::Integer(1)),
+            _ if token.kw("FALSE") => Ok(Value::Integer(0)),
+            TokenKind::Number(n) => crate::defaults::number_literal(n, affinity, encoding),
+            _ => Err("expression DEFAULT is unsupported"),
+        },
+        [sign, number] => match (&sign.kind, &number.kind) {
+            (TokenKind::Symbol(sign), TokenKind::Number(n)) if matches!(sign, '+' | '-') => {
+                crate::defaults::number_literal(&format!("{sign}{n}"), affinity, encoding)
+            }
+            _ => Err("expression DEFAULT is unsupported"),
+        },
         _ => Err("expression DEFAULT is unsupported"),
     }
 }

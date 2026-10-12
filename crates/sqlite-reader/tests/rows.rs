@@ -89,54 +89,7 @@ fn reserved_bytes_are_excluded_from_cells_and_overflow() {
 
 #[test]
 fn duplicate_keys_and_numeric_separators_match_sqlite() {
-    let reader = Reader::open(Pages::new(UTF8)).unwrap();
-    let mut actual = String::new();
-    for name in ["duplicates", "same_key"] {
-        let table = reader.table(name).unwrap();
-        let row = table.rows().next().unwrap().unwrap();
-        let a = match row.get("a").unwrap() {
-            Value::Integer(n) => n.to_string(),
-            v => text(v),
-        };
-        let b = match row.get("b").unwrap() {
-            Value::Integer(n) => n.to_string(),
-            v => text(v),
-        };
-        actual.push_str(&format!("{}|{a}|{b}\n", text(row.get("payload").unwrap())));
-    }
-    let table = reader.table("repeated_rowid").unwrap();
-    let row = table.rows().next().unwrap().unwrap();
-    actual.push_str(&format!(
-        "{}|{}|{}\n",
-        row.rowid().unwrap(),
-        int(row.get("a").unwrap()),
-        text(row.get("b").unwrap())
-    ));
-    let table = reader.table("separators").unwrap();
-    let row = table.rows().next().unwrap().unwrap();
-    let Value::Real(real) = row.get("r").unwrap() else {
-        panic!()
-    };
-    actual.push_str(&format!(
-        "{}|{}|{real:.1}|text|{}\n",
-        int(row.get("i").unwrap()),
-        int(row.get("h").unwrap()),
-        text(row.get("t").unwrap())
-    ));
-    for name in ["duplicates", "same_key"] {
-        for col in reader.table(name).unwrap().columns() {
-            actual.push_str(&format!(
-                "{}|{}\n",
-                col.name(),
-                col.primary_key_position().unwrap_or(0)
-            ));
-        }
-    }
-    assert_expected(
-        &actual,
-        include_str!("fixtures/reader-ddl.expected"),
-        "reader-utf8 / DDL",
-    );
+    assert_schema_rows(&["duplicates", "same_key", "repeated_rowid", "separators"]);
 }
 
 #[test]
@@ -400,10 +353,17 @@ fn schema_and_supported_tables_survive_unsupported_ddl() {
             .iter()
             .any(|o| o.kind == "trigger" && o.name == "people_trigger")
     );
-    assert!(matches!(
-        reader.table("expression_default"),
-        Err(ReaderError::Unsupported(_))
-    ));
+    for name in [
+        "expression_default",
+        "unsupported_date",
+        "unsupported_time",
+        "unsupported_timestamp",
+    ] {
+        assert!(matches!(
+            reader.table(name),
+            Err(ReaderError::Unsupported(_))
+        ));
+    }
     assert_eq!(
         reader
             .table("constraints")
@@ -978,4 +938,93 @@ fn stored_generated_null_is_valid_but_missing_slot_is_an_error() {
             assert!(rows.next().is_none());
         }
     }
+}
+
+fn assert_schema_rows(names: &[&str]) {
+    fn encoded(value: &Value) -> String {
+        match value {
+            Value::Null => "N".into(),
+            Value::Integer(n) => format!("I{n}"),
+            Value::Real(n) => format!("R{:016x}", n.to_bits()),
+            Value::Text(t) => format!(
+                "T{}",
+                t.to_string()
+                    .unwrap()
+                    .as_bytes()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            ),
+            Value::Blob(_) => panic!("unexpected blob"),
+        }
+    }
+    let oracle = include_str!("fixtures/reader-ddl.expected");
+    let expected = oracle
+        .lines()
+        .filter(|line| {
+            line.split_once('|')
+                .is_some_and(|(table, _)| names.contains(&table))
+        })
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
+    for bytes in [UTF8, LE, BE] {
+        let reader = Reader::open(Pages::new(bytes)).unwrap();
+        let mut actual = String::new();
+        for name in names {
+            let table = reader.table(name).unwrap();
+            for column in table.columns() {
+                actual.push_str(&format!(
+                    "{name}|column|{}|{}|{}|{}\n",
+                    column.name(),
+                    column.declared_type(),
+                    u8::from(column.not_null()),
+                    column.primary_key_position().unwrap_or(0)
+                ));
+            }
+            for row in table.rows() {
+                let row = row.unwrap();
+                let rowid = row.rowid().map(Value::Integer).unwrap_or(Value::Null);
+                actual.push_str(&format!("{name}|row|{}|", encoded(&rowid)));
+                actual.push_str(
+                    &row.values()
+                        .iter()
+                        .map(encoded)
+                        .collect::<Vec<_>>()
+                        .join("|"),
+                );
+                actual.push('\n');
+            }
+        }
+        assert_expected(
+            &actual,
+            &expected,
+            &format!("schema rows / {:?}", reader.header().text_encoding()),
+        );
+    }
+}
+
+#[test]
+fn ddl_compat_numeric_whitespace() {
+    assert_schema_rows(&["numeric_space"]);
+}
+
+#[test]
+fn ddl_compat_bare_defaults() {
+    assert_schema_rows(&["bare_defaults"]);
+}
+
+#[test]
+fn ddl_compat_check_conflicts() {
+    assert_schema_rows(&["check_conflict"]);
+}
+
+#[test]
+fn ddl_compat_quoted_types_and_rowid_aliases() {
+    assert_schema_rows(&[
+        "quoted_types",
+        "quoted_alias",
+        "quoted_nonalias",
+        "parameterized_nonalias",
+        "descending_nonalias",
+    ]);
 }

@@ -54,7 +54,7 @@ lookup are not provided. Generated expressions and constraints are not evaluated
 
 Tables containing VIRTUAL generated columns or expression defaults are rejected
 when opened. Other supported tables and schema enumeration remain available.
-Numeric default conversion follows SQLite 3.53.4; floating-point results can
+Numeric default conversion follows SQLite 3.54.0; floating-point results can
 vary slightly across SQLite versions or builds.
 
 Opening checks the header and file layout; further errors can occur while

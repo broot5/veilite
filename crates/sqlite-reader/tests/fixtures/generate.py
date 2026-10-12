@@ -1,4 +1,4 @@
-"""Regenerate using SQLite 3.53.4 CLI; not used by cargo test."""
+"""Regenerate using SQLite 3.54.0 CLI; not used by cargo test."""
 from pathlib import Path
 import random
 import sqlite3
@@ -8,7 +8,7 @@ import tempfile
 
 root = Path(__file__).resolve().parent
 version = subprocess.check_output(['sqlite3', '--version'], text=True).strip()
-if version != '3.53.4 2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc (64-bit)':
+if version != '3.54.0 2026-10-09 15:46:58 be8d059e9a49089ab2dce5ed26dd87aaf598fdc5fbe0b107c0dd758464bcd5e3 (64-bit)':
     raise SystemExit(f'Unexpected fixture generator: {version}')
 with sqlite3.connect(':memory:') as connection:
     source_id = connection.execute('select sqlite_source_id()').fetchone()[0]
@@ -68,12 +68,39 @@ def generated_expected(connection, encoding):
     return ''.join(lines)
 
 
+def encoded(value):
+    if value is None:
+        return 'N'
+    if isinstance(value, int):
+        return 'I' + str(value)
+    if isinstance(value, float):
+        return 'R' + struct.pack('>d', value).hex()
+    return 'T' + value.encode('utf-8').hex()
+
+
+def ddl_expected(connection):
+    lines = []
+    for table in ['duplicates', 'same_key', 'repeated_rowid', 'separators',
+                  'numeric_space', 'bare_defaults', 'check_conflict', 'quoted_types',
+                  'quoted_alias', 'quoted_nonalias', 'parameterized_nonalias',
+                  'descending_nonalias']:
+        for _, name, typ, nn, _, pk in connection.execute(f'PRAGMA table_info({table})'):
+            lines.append(f'{table}|column|{name}|{typ}|{nn}|{pk}')
+        # WITHOUT ROWID tables have no row locator; each case has one row.
+        query_sql = (f'SELECT NULL,* FROM {table}' if table in ['duplicates', 'same_key']
+                     else f'SELECT rowid,* FROM {table} ORDER BY rowid')
+        for row in connection.execute(query_sql):
+            lines.append(f'{table}|row|' + '|'.join(map(encoded, row)))
+    return '\n'.join(lines) + '\n'
+
+
 def query(database, sql):
     return subprocess.check_output(['sqlite3', '-readonly', str(database), sql], text=True)
 
 
 numeric_expected = None
 grammar_expected = None
+ddl_results = None
 for name, size, encoding, script in [
     ('header-utf8', 512, 'UTF-8', 'header.sql'),
     ('header-utf16le', 4096, 'UTF-16le', 'header.sql'),
@@ -88,8 +115,12 @@ for name, size, encoding, script in [
         connection = sqlite3.connect(database)
         connection.execute(f'PRAGMA page_size={size}')
         connection.execute(f"PRAGMA encoding='{encoding}'")
-        connection.executescript((root / script).read_text())
+        connection.executescript((root / script).read_text().replace('@VT@', '\x0b'))
         if script == 'reader.sql':
+            expected = ddl_expected(connection)
+            if ddl_results is not None and expected != ddl_results:
+                raise RuntimeError(f'DDL results differ for {encoding}')
+            ddl_results = expected
             connection.execute('CREATE TABLE empty(value)')
             connection.execute('CREATE TABLE wide(' + ','.join(f'c{i}' for i in range(130)) + ')')
             connection.execute('INSERT INTO wide VALUES(' + ','.join('NULL' for _ in range(130)) + ')')
@@ -135,13 +166,9 @@ for name, size, encoding, script in [
                 SELECT name,type,"notnull",pk FROM pragma_table_info('strict_composite');
                 SELECT name,type,"notnull",pk FROM pragma_table_info('ordinary_key');"""
             (root / 'reader-boundaries.expected').write_text(query(database, sql))
-            sql = """SELECT payload,a,b FROM duplicates;SELECT payload,a,b FROM same_key;
-                SELECT rowid,a,b FROM repeated_rowid;SELECT i,h,r,typeof(t),t FROM separators;
-                SELECT name,pk FROM pragma_table_info('duplicates');
-                SELECT name,pk FROM pragma_table_info('same_key');"""
-            (root / 'reader-ddl.expected').write_text(query(database, sql))
 (root / 'reader-numeric.expected').write_text(numeric_expected)
 (root / 'reader-grammar.expected').write_text(grammar_expected)
+(root / 'reader-ddl.expected').write_text(ddl_results)
 
 
 # A larger independent oracle for decimal parsing, including the significand

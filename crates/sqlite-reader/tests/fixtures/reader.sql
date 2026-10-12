@@ -179,3 +179,58 @@ CREATE TABLE wrapped_keys(
     PRIMARY KEY(((a) COLLATE NOCASE) COLLATE BINARY, (a) COLLATE NOCASE, ((b)) DESC)
 ) WITHOUT ROWID;
 INSERT INTO wrapped_keys VALUES('payload', 'Ab', 7);
+
+-- Schema and default-value cases
+-- @VT@ is replaced with U+000B by generate.py.
+CREATE TABLE numeric_space(id INTEGER PRIMARY KEY);
+INSERT INTO numeric_space VALUES(1);
+ALTER TABLE numeric_space ADD COLUMN n NUMERIC DEFAULT '@VT@42@VT@';
+ALTER TABLE numeric_space ADD COLUMN i INTEGER DEFAULT '@VT@-12@VT@';
+ALTER TABLE numeric_space ADD COLUMN r REAL DEFAULT '@VT@2.5@VT@';
+ALTER TABLE numeric_space ADD COLUMN t TEXT DEFAULT '@VT@42@VT@';
+ALTER TABLE numeric_space ADD COLUMN internal NUMERIC DEFAULT '4@VT@2';
+ALTER TABLE numeric_space ADD COLUMN unicode_space NUMERIC DEFAULT ' 42 ';
+INSERT INTO numeric_space(id) VALUES(2);
+
+CREATE TABLE bare_defaults(id INTEGER PRIMARY KEY);
+INSERT INTO bare_defaults VALUES(1);
+ALTER TABLE bare_defaults ADD COLUMN status TEXT DEFAULT pending;
+ALTER TABLE bare_defaults ADD COLUMN opaque NUMERIC DEFAULT pending;
+ALTER TABLE bare_defaults ADD COLUMN yes TEXT DEFAULT TRUE;
+ALTER TABLE bare_defaults ADD COLUMN no NUMERIC DEFAULT FALSE;
+ALTER TABLE bare_defaults ADD COLUMN absent TEXT DEFAULT NULL;
+ALTER TABLE bare_defaults ADD COLUMN quoted TEXT DEFAULT "CURRENT_TIMESTAMP";
+INSERT INTO bare_defaults(id) VALUES(2);
+
+CREATE TABLE check_conflict(a INTEGER,
+    CHECK(a>0) ON CONFLICT ROLLBACK,
+    CONSTRAINT named CHECK(a<100) ON CONFLICT ABORT,
+    CHECK(a<>2) ON CONFLICT FAIL,
+    CHECK(a<>3) ON CONFLICT IGNORE,
+    CHECK(a<>4) ON CONFLICT REPLACE);
+INSERT INTO check_conflict VALUES(7);
+
+CREATE TABLE quoted_types(id INTEGER PRIMARY KEY);
+INSERT INTO quoted_types VALUES(1);
+ALTER TABLE quoted_types ADD COLUMN dq "REAL" INT DEFAULT 7;
+ALTER TABLE quoted_types ADD COLUMN sq 'REAL' INT DEFAULT 7;
+ALTER TABLE quoted_types ADD COLUMN tick `REAL` INT DEFAULT 7;
+ALTER TABLE quoted_types ADD COLUMN bracket [REAL] INT DEFAULT 7;
+ALTER TABLE quoted_types ADD COLUMN text_type "TEXT" INT DEFAULT 7;
+ALTER TABLE quoted_types ADD COLUMN suffix REAL "INT" DEFAULT 7;
+ALTER TABLE quoted_types ADD COLUMN comment_type REAL /* INT */ FLOAT DEFAULT 7;
+ALTER TABLE quoted_types ADD COLUMN parameterized "REAL"(8,2) DEFAULT 7;
+INSERT INTO quoted_types(id) VALUES(2);
+
+CREATE TABLE quoted_alias(id "INTEGER" PRIMARY KEY, value TEXT) STRICT;
+INSERT INTO quoted_alias VALUES(17,'alias');
+CREATE TABLE quoted_nonalias(id "INTEGER" extra PRIMARY KEY, value TEXT);
+INSERT INTO quoted_nonalias(rowid,id,value) VALUES(31,17,'not alias');
+CREATE TABLE parameterized_nonalias(id "INTEGER"(8) PRIMARY KEY, value TEXT);
+INSERT INTO parameterized_nonalias(rowid,id,value) VALUES(31,17,'not alias');
+CREATE TABLE descending_nonalias(id "INTEGER" PRIMARY KEY DESC, value TEXT);
+INSERT INTO descending_nonalias(rowid,id,value) VALUES(31,17,'not alias');
+
+CREATE TABLE unsupported_date(a DEFAULT CURRENT_DATE);
+CREATE TABLE unsupported_time(a DEFAULT CURRENT_TIME);
+CREATE TABLE unsupported_timestamp(a DEFAULT CURRENT_TIMESTAMP);

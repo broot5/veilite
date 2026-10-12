@@ -1,7 +1,13 @@
 use super::Result;
 
 #[derive(Debug)]
-pub(super) enum Token {
+pub(super) struct Token {
+    pub(super) kind: TokenKind,
+    pub(super) span: std::ops::Range<usize>,
+}
+
+#[derive(Debug)]
+pub(super) enum TokenKind {
     Word(String, bool),
     String(String),
     Number(String),
@@ -10,22 +16,15 @@ pub(super) enum Token {
 }
 impl Token {
     pub(super) fn kw(&self, expected: &str) -> bool {
-        matches!(self, Self::Word(word, false) if word.eq_ignore_ascii_case(expected))
+        matches!(&self.kind, TokenKind::Word(word, false) if word.eq_ignore_ascii_case(expected))
     }
     pub(super) fn symbol(&self, expected: char) -> bool {
-        matches!(self, Self::Symbol(c) if *c == expected)
+        matches!(&self.kind, TokenKind::Symbol(c) if *c == expected)
     }
     pub(super) fn name(&self) -> Option<&str> {
-        match self {
-            Self::Word(s, _) | Self::String(s) => Some(s),
+        match &self.kind {
+            TokenKind::Word(s, _) | TokenKind::String(s) => Some(s),
             _ => None,
-        }
-    }
-    pub(super) fn spelling(&self) -> String {
-        match self {
-            Self::Word(s, _) | Self::String(s) | Self::Number(s) => s.clone(),
-            Self::Symbol(c) => c.to_string(),
-            Self::Blob(_) => String::new(),
         }
     }
 }
@@ -56,6 +55,7 @@ pub(super) fn lex(sql: &str) -> Result<Vec<Token>> {
             i += 2;
             continue;
         }
+        let start = i;
         let blob = matches!(b[i], b'x' | b'X') && b.get(i + 1) == Some(&b'\'');
         if blob {
             i += 1;
@@ -83,7 +83,7 @@ pub(super) fn lex(sql: &str) -> Result<Vec<Token>> {
                 }
             }
             let value = String::from_utf8(value).map_err(|_| "invalid SQL text")?;
-            tokens.push(if blob {
+            let kind = if blob {
                 if value.len() % 2 != 0 {
                     return Err("invalid blob literal");
                 }
@@ -97,11 +97,15 @@ pub(super) fn lex(sql: &str) -> Result<Vec<Token>> {
                         .ok_or("invalid blob literal")?;
                     out.push((high * 16 + low) as u8);
                 }
-                Token::Blob(out)
+                TokenKind::Blob(out)
             } else if quote == b'\'' {
-                Token::String(value)
+                TokenKind::String(value)
             } else {
-                Token::Word(value, true)
+                TokenKind::Word(value, true)
+            };
+            tokens.push(Token {
+                kind,
+                span: start..i,
             });
             continue;
         }
@@ -115,7 +119,10 @@ pub(super) fn lex(sql: &str) -> Result<Vec<Token>> {
             {
                 i += 1;
             }
-            tokens.push(Token::Number(sql[start..i].into()));
+            tokens.push(Token {
+                kind: TokenKind::Number(sql[start..i].into()),
+                span: start..i,
+            });
             continue;
         }
         if b[i].is_ascii_alphabetic() || b[i] == b'_' || b[i] >= 128 {
@@ -126,13 +133,19 @@ pub(super) fn lex(sql: &str) -> Result<Vec<Token>> {
             {
                 i += 1;
             }
-            tokens.push(Token::Word(sql[start..i].into(), false));
+            tokens.push(Token {
+                kind: TokenKind::Word(sql[start..i].into(), false),
+                span: start..i,
+            });
             continue;
         }
         if !b[i].is_ascii() {
             return Err("invalid SQL token");
         }
-        tokens.push(Token::Symbol(b[i] as char));
+        tokens.push(Token {
+            kind: TokenKind::Symbol(b[i] as char),
+            span: i..i + 1,
+        });
         i += 1;
     }
     Ok(tokens)
