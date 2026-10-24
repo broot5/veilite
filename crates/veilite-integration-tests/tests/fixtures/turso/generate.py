@@ -1,4 +1,4 @@
-"""Regenerate with SQLCipher Community 4.18.0 / SQLite 3.53.4.
+"""Regenerate with SQLCipher and report the engine versions used.
 
 Usage: python3 generate.py /path/to/sqlcipher
 Only synthetic data and a public test passphrase are used.
@@ -10,8 +10,14 @@ import tempfile
 
 root = pathlib.Path(__file__).resolve().parent
 engine = sys.argv[1] if len(sys.argv) > 1 else "sqlcipher"
-version = subprocess.check_output([engine, "--version"], text=True)
-assert version.startswith("3.53.4 ") and "4.18.0 community" in version, version
+versions = subprocess.check_output(
+    [engine, ":memory:"],
+    input=".bail on\nPRAGMA cipher_version; SELECT sqlite_version();\n",
+    text=True,
+).strip().splitlines()
+if len(versions) != 2:
+    sys.exit("SQLCipher is required: PRAGMA cipher_version returned no version.")
+print(f"SQLCipher {versions[0]} / SQLite {versions[1]}", flush=True)
 key = "PRAGMA key='veilite-turso-fixture'; PRAGMA cipher_compatibility=3;"
 prefix = ".bail on\nPRAGMA cipher_default_compatibility=3;\n" + key
 cases = {
@@ -35,4 +41,11 @@ SELECT a,b FROM reordered;
                                     text=True, capture_output=True, check=True)
             # PRAGMA key emits 'ok' before the four query results.
             assert result.stdout.strip().splitlines()[-4:] == ["1|x", "x|42", "x|7", "A|B"], result.stdout
-        (root / path.name).write_bytes(path.read_bytes())
+        without_key = subprocess.run(
+            [engine, str(path)], input=".bail on\nSELECT count(*) FROM sqlite_master;\n",
+            text=True, capture_output=True,
+        )
+        if without_key.returncode == 0:
+            sys.exit(f"{name}: generated database is readable without a key")
+    for name in cases:
+        (root / (name + ".db")).write_bytes((pathlib.Path(directory) / (name + ".db")).read_bytes())
