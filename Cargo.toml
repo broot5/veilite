@@ -26,7 +26,6 @@ sha1 = "0.11.0"
 sha2 = "0.11.0"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
-# Pin the experimental PageCodec API; JSON/UUID are required by this release.
 turso_core = { version = "=0.8.3", default-features = false, features = ["fs", "pure-rust-crypto", "json", "uuid"] }
 veilite-core = { version = "0.1.0", path = "crates/veilite-core" }
 veilite-turso = { version = "0.1.0", path = "crates/veilite-turso" }
