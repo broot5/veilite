@@ -8,10 +8,9 @@
 //! [`SqlCipherReader::open`] derives keys but authenticates pages lazily. A page
 //! is decrypted only after its stored HMAC has been verified.
 //!
-//! [`SqlCipherReader`] implements [`sqlite_source::PageSource`], which can also
-//! be consumed by independent page readers. [`PageDecryptor`] supports
-//! storage-engine adapters such as `veilite-turso`. Provide a checkpointed
-//! snapshot that needs no WAL or journal.
+//! [`ReadAt`], [`FileSource`], and [`SliceSource`] supply immutable input bytes.
+//! [`PageDecryptor`] supports storage-engine adapters such as `veilite-turso`.
+//! Provide a checkpointed snapshot that needs no WAL or journal.
 //!
 //! ```no_run
 //! use std::num::NonZeroU32;
@@ -31,8 +30,9 @@
 mod config;
 mod decryptor;
 mod reader;
+mod source;
 
 pub use config::{CipherConfig, CipherConfigError, CipherPreset, HashAlgorithm};
 pub use decryptor::{DecryptError, PageDecryptor};
 pub use reader::{ReaderError, SqlCipherReader};
-pub use sqlite_source::{FileSource, ReadAt, SliceSource};
+pub use source::{FileSource, ReadAt, SliceSource};

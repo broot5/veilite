@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "crates/sqlite-source",
     "crates/veilite-core",
     "crates/veilite-turso",
     "crates/veilite-cli",
@@ -25,7 +24,6 @@ pbkdf2 = "0.13.0"
 rpassword = "7.5.4"
 sha1 = "0.11.0"
 sha2 = "0.11.0"
-sqlite-source = { version = "0.1.0", path = "crates/sqlite-source" }
 tempfile = "3.27.0"
 thiserror = "2.0.18"
 # Pin the experimental PageCodec API; JSON/UUID are required by this release.

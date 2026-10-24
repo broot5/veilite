@@ -8,8 +8,6 @@ OpenSSL. Rust 1.89 or newer is required.
 
 ## Components
 
-- `sqlite-source` provides shared byte and page source interfaces. See its
-  [README](crates/sqlite-source/README.md).
 - `veilite-turso` runs SQL queries over encrypted snapshots using Turso. See its
   [README](crates/veilite-turso/README.md).
 - `veilite-core` provides authenticated random-access page reads and
