@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 
-/// Random-access byte source used by [`crate::SqlCipherReader`].
+/// Random-access byte source for immutable snapshots.
 ///
 /// The source contents and length must remain unchanged while the reader
 /// exists. Each read must use the supplied offset independently of any shared

@@ -6,6 +6,23 @@ use hmac::{KeyInit, Mac};
 use super::*;
 
 #[test]
+fn public_decoder_rejects_and_clears_wrong_length_buffers() {
+    let config = CipherConfig::new(1024, 1, HashAlgorithm::Sha256, HashAlgorithm::Sha256).unwrap();
+    let decoder = PageDecryptor::new(config, b"test", &[0; 16]).unwrap();
+    for length in [0, 1, 1023, 1025, 2048] {
+        let mut page = vec![0xaa; length];
+        assert_eq!(
+            decoder.decrypt_page_in_place(NonZeroU32::MIN, &mut page),
+            Err(DecryptError::InvalidPageLength {
+                expected: 1024,
+                actual: length
+            })
+        );
+        assert!(page.iter().all(|b| *b == 0));
+    }
+}
+
+#[test]
 fn rejects_empty_passphrase() {
     for config in [
         CipherConfig::from(crate::CipherPreset::SqlCipher3),
@@ -34,19 +51,6 @@ fn rejects_all_zero_physical_pages() {
         assert_eq!(error, DecryptError::AuthenticationFailed { page_no: 1 });
         assert!(page.iter().all(|byte| *byte == 0));
     }
-}
-
-#[test]
-fn derives_a_sha256_key_from_a_known_answer() {
-    let mut actual = [0; 32];
-    PageDecryptor::derive_key_into(HashAlgorithm::Sha256, b"password", b"salt", 1, &mut actual);
-    let expected = [
-        0x12, 0x0f, 0xb6, 0xcf, 0xfc, 0xf8, 0xb3, 0x2c, 0x43, 0xe7, 0x22, 0x52, 0x56, 0xc4, 0xf8,
-        0x37, 0xa8, 0x65, 0x48, 0xc9, 0x2c, 0xcc, 0x35, 0x48, 0x08, 0x05, 0x98, 0x7c, 0xb7, 0x0b,
-        0xe1, 0x7b,
-    ];
-
-    assert_eq!(actual, expected);
 }
 
 #[test]

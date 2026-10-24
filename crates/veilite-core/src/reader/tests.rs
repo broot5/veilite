@@ -143,6 +143,7 @@ fn rejects_out_of_range_pages_and_reads() {
         assert!(matches!(error, ReaderError::UnexpectedEof { .. }));
         assert_eq!(output, [0; 2]);
 
+        output.fill(0xaa);
         let error = reader.read_exact_at(u64::MAX, &mut output).unwrap_err();
         assert!(matches!(error, ReaderError::OffsetOverflow { .. }));
         assert_eq!(output, [0; 2]);

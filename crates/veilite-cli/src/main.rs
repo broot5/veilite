@@ -4,12 +4,10 @@ use std::io::{self, Read, Write};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
-use bstr::BStr;
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use veilite_core::{CipherConfig, CipherPreset, FileSource, HashAlgorithm, SqlCipherReader};
-use veilite_graphitesql::{QueryResult, Value, check_companion_files, open_readonly};
 use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Debug, Parser)]
@@ -32,12 +30,6 @@ enum Command {
     /// Reports sibling -wal and -journal files without opening the database or
     /// reading a passphrase.
     Inspect(InspectArgs),
-
-    /// Execute a read-only SQL query
-    ///
-    /// Input must be an immutable main database snapshot. Sibling -wal and
-    /// -journal files are rejected.
-    Query(QueryArgs),
 
     /// Authenticate every encrypted database page
     ///
@@ -71,23 +63,6 @@ struct InspectArgs {
     /// SQLCipher encrypted main database
     #[arg(value_name = "ENCRYPTED_DB")]
     input_path: PathBuf,
-}
-
-#[derive(Debug, Args)]
-struct QueryArgs {
-    #[command(flatten)]
-    cipher: CipherArgs,
-
-    #[command(flatten)]
-    passphrase: PassphraseArgs,
-
-    /// SQLCipher encrypted main database
-    #[arg(value_name = "ENCRYPTED_DB")]
-    input_path: PathBuf,
-
-    /// Read-only SQL statement to execute
-    #[arg(value_name = "SQL")]
-    sql: String,
 }
 
 #[derive(Debug, Args)]
@@ -287,18 +262,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     match CliArgs::parse().command {
         Command::Export(args) => export(args),
         Command::Inspect(args) => inspect(args),
-        Command::Query(args) => query(args),
         Command::Verify(args) => verify(args),
     }
 }
 
 fn export(args: ExportArgs) -> Result<(), Box<dyn Error>> {
-    let config = args.cipher.config()?;
-    check_companion_files(&args.input_path)?;
-    let passphrase = read_passphrase(&args.passphrase)?;
-    let source = open_encrypted_database(&args.input_path)?;
-    let reader = SqlCipherReader::open(source, config, passphrase.as_slice())?;
-    drop(passphrase);
+    let reader = open_reader(&args.input_path, &args.cipher, &args.passphrase)?;
 
     write_decrypted_database(&args.output_path, &reader)?;
 
@@ -367,6 +336,24 @@ fn open_encrypted_database(path: &Path) -> io::Result<FileSource> {
         .map_err(|source| path_io_error("failed to open encrypted database", path, source))
 }
 
+fn open_reader(
+    path: &Path,
+    cipher: &CipherArgs,
+    passphrase_args: &PassphraseArgs,
+) -> Result<SqlCipherReader<FileSource>, Box<dyn Error>> {
+    let config = cipher.config()?;
+    check_companion_files(path)?;
+    let resolved = path
+        .canonicalize()
+        .map_err(|source| path_io_error("failed to resolve encrypted database", path, source))?;
+    check_companion_files(&resolved)?;
+    let passphrase = read_passphrase(passphrase_args)?;
+    let source = open_encrypted_database(&resolved)?;
+    let reader = SqlCipherReader::open(source, config, passphrase.as_slice())?;
+    drop(passphrase);
+    Ok(reader)
+}
+
 fn inspect(args: InspectArgs) -> Result<(), Box<dyn Error>> {
     let config = args.cipher.config()?;
     let metadata = fs::metadata(&args.input_path).map_err(|source| {
@@ -388,8 +375,13 @@ fn inspect(args: InspectArgs) -> Result<(), Box<dyn Error>> {
     let page_size = config.page_size() as u64;
     validate_encrypted_file_size(file_size, page_size)?;
 
-    let wal_path = companion_path(&args.input_path, "-wal");
-    let journal_path = companion_path(&args.input_path, "-journal");
+    let resolved = args.input_path.canonicalize().map_err(|source| {
+        path_io_error(
+            "failed to resolve encrypted database",
+            &args.input_path,
+            source,
+        )
+    })?;
     let stdout = io::stdout();
     let mut output = stdout.lock();
 
@@ -416,31 +408,21 @@ fn inspect(args: InspectArgs) -> Result<(), Box<dyn Error>> {
     )?;
     writeln!(output, "reserve size: {} bytes", config.reserve_size())?;
     writeln!(output, "page count: {}", file_size / page_size)?;
-    writeln!(output, "WAL: {}", presence(&wal_path)?)?;
-    writeln!(output, "journal: {}", presence(&journal_path)?)?;
-    Ok(())
-}
-
-fn query(args: QueryArgs) -> Result<(), Box<dyn Error>> {
-    let config = args.cipher.config()?;
-    check_companion_files(&args.input_path)?;
-    let passphrase = read_passphrase(&args.passphrase)?;
-    let connection = open_readonly(&args.input_path, config, passphrase.as_slice())?;
-    drop(passphrase);
-    let result = connection.query(&args.sql)?;
-
-    let stdout = io::stdout();
-    write_query_result(stdout.lock(), &result)?;
+    writeln!(
+        output,
+        "WAL: {}",
+        presence(&args.input_path, &resolved, "-wal")?
+    )?;
+    writeln!(
+        output,
+        "journal: {}",
+        presence(&args.input_path, &resolved, "-journal")?
+    )?;
     Ok(())
 }
 
 fn verify(args: VerifyArgs) -> Result<(), Box<dyn Error>> {
-    let config = args.cipher.config()?;
-    check_companion_files(&args.input_path)?;
-    let passphrase = read_passphrase(&args.passphrase)?;
-    let source = open_encrypted_database(&args.input_path)?;
-    let reader = SqlCipherReader::open(source, config, passphrase.as_slice())?;
-    drop(passphrase);
+    let reader = open_reader(&args.input_path, &args.cipher, &args.passphrase)?;
     let mut plaintext_page = Zeroizing::new(vec![0; reader.page_size()]);
 
     for page_no in 1..=reader.page_count() {
@@ -519,51 +501,37 @@ fn companion_path(path: &Path, suffix: &str) -> PathBuf {
     companion.into()
 }
 
-fn presence(path: &Path) -> io::Result<&'static str> {
-    path.try_exists()
-        .map_err(|source| path_io_error("failed to inspect companion file", path, source))
-        .map(|exists| if exists { "present" } else { "absent" })
-}
-
-fn write_query_result(mut output: impl Write, result: &QueryResult) -> io::Result<()> {
-    write_cells(&mut output, &result.columns, |column, output| {
-        write!(output, "{column:?}")
-    })?;
-
-    for row in &result.rows {
-        write_cells(&mut output, row, write_value)?;
+// Check companion files before requesting a passphrase or opening the snapshot.
+fn check_companion_files(path: &Path) -> io::Result<()> {
+    for (suffix, kind) in [("-wal", "WAL"), ("-journal", "rollback journal")] {
+        let companion = companion_path(path, suffix);
+        if companion_exists(&companion)? {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("SQLCipher {kind} companion file is unsupported: {companion:?}"),
+            ));
+        }
     }
     Ok(())
 }
 
-fn write_cells<T>(
-    output: &mut impl Write,
-    cells: &[T],
-    mut write_cell: impl FnMut(&T, &mut dyn Write) -> io::Result<()>,
-) -> io::Result<()> {
-    for (index, cell) in cells.iter().enumerate() {
-        if index > 0 {
-            output.write_all(b"|")?;
-        }
-        write_cell(cell, output)?;
+fn companion_exists(path: &Path) -> io::Result<bool> {
+    // A dangling symlink is still a companion directory entry.
+    match path.symlink_metadata() {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(path_io_error(
+            "failed to inspect companion file",
+            path,
+            error,
+        )),
     }
-    output.write_all(b"\n")
 }
 
-fn write_value(value: &Value, output: &mut dyn Write) -> io::Result<()> {
-    match value {
-        Value::Null => output.write_all(b"NULL"),
-        Value::Integer(value) => write!(output, "{value}"),
-        Value::Real(value) => write!(output, "{value}"),
-        Value::Text(value) => write!(output, "{:?}", BStr::new(value.as_bytes())),
-        Value::Blob(value) => {
-            output.write_all(b"X'")?;
-            for byte in value {
-                write!(output, "{byte:02x}")?;
-            }
-            output.write_all(b"'")
-        }
-    }
+fn presence(path: &Path, resolved: &Path, suffix: &str) -> io::Result<&'static str> {
+    let exists = companion_exists(&companion_path(path, suffix))?
+        || companion_exists(&companion_path(resolved, suffix))?;
+    Ok(if exists { "present" } else { "absent" })
 }
 
 fn main() {

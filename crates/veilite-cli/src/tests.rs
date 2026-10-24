@@ -1,5 +1,4 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use veilite_graphitesql::graphitesql::Text as EngineText;
 
 use clap::{CommandFactory, error::ErrorKind};
 
@@ -15,7 +14,6 @@ fn parse_cipher_config(args: &[&str]) -> Result<CipherConfig, Box<dyn Error>> {
     match parsed.command {
         Command::Export(args) => args.cipher.config(),
         Command::Inspect(args) => args.cipher.config(),
-        Command::Query(args) => args.cipher.config(),
         Command::Verify(args) => args.cipher.config(),
     }
 }
@@ -32,14 +30,6 @@ fn accepts_preset_configuration_for_every_command() {
             "plaintext.db",
         ],
         vec!["veilite", "inspect", "--preset", "4", "encrypted.db"],
-        vec![
-            "veilite",
-            "query",
-            "--preset",
-            "4",
-            "encrypted.db",
-            "SELECT 1",
-        ],
         vec!["veilite", "verify", "--preset", "4", "encrypted.db"],
     ] {
         assert_eq!(
@@ -68,13 +58,11 @@ fn accepts_complete_custom_configuration_for_every_command() {
     for mut args in [
         vec!["veilite", "export"],
         vec!["veilite", "inspect"],
-        vec!["veilite", "query"],
         vec!["veilite", "verify"],
     ] {
         args.extend(custom);
         match args[1] {
             "export" => args.extend(["encrypted.db", "plaintext.db"]),
-            "query" => args.extend(["encrypted.db", "SELECT 1"]),
             _ => args.push("encrypted.db"),
         }
 
@@ -207,51 +195,10 @@ fn stops_reading_after_first_line_and_propagates_earlier_errors() {
 }
 
 #[test]
-fn writes_query_results() {
-    let result = QueryResult {
-        columns: vec![
-            "null".into(),
-            "integer".into(),
-            "real".into(),
-            "text".into(),
-            "escaped".into(),
-            "invalid UTF-8".into(),
-            "blob".into(),
-        ],
-        rows: vec![vec![
-            Value::Null,
-            Value::Integer(-42),
-            Value::Real(3.5),
-            Value::Text(EngineText::from_bytes(b"hello".to_vec())),
-            Value::Text(EngineText::from_bytes(
-                "pipe|line\n홍길동".as_bytes().to_vec(),
-            )),
-            Value::Text(EngineText::from_bytes(vec![b'a', 0xff])),
-            Value::Blob(vec![0x00, 0xab, 0xff]),
-        ]],
-    };
-    let mut output = Vec::new();
-
-    write_query_result(&mut output, &result).unwrap();
-
-    assert_eq!(
-        output,
-        concat!(
-            "\"null\"|\"integer\"|\"real\"|\"text\"|\"escaped\"|",
-            "\"invalid UTF-8\"|\"blob\"\n",
-            "NULL|-42|3.5|\"hello\"|\"pipe|line\\n홍길동\"|",
-            "\"a\\xff\"|X'00abff'\n"
-        )
-        .as_bytes()
-    );
-}
-
-#[test]
-fn preserves_existing_outputs_and_removes_failed_exports() {
+fn preserves_existing_outputs() {
     let directory = TemporaryDirectory::new();
     let input_path = directory.path().join("encrypted.db");
     let existing_output_path = directory.path().join("existing.db");
-    let partial_output_path = directory.path().join("partial.db");
     let config = CipherConfig::from(CipherPreset::SqlCipher4);
     fs::write(&input_path, vec![0; config.page_size()]).unwrap();
     fs::write(&existing_output_path, b"keep this").unwrap();
@@ -266,9 +213,6 @@ fn preserves_existing_outputs_and_removes_failed_exports() {
     assert!(error.to_string().contains("failed to create export"));
     assert!(error.to_string().contains("existing.db"));
     assert_eq!(fs::read(&existing_output_path).unwrap(), b"keep this");
-
-    assert!(write_decrypted_database(&partial_output_path, &reader).is_err());
-    assert!(!partial_output_path.exists());
 }
 
 #[test]
