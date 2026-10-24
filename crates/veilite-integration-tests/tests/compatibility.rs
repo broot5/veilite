@@ -24,106 +24,14 @@ impl FixtureCase {
 }
 
 #[test]
-fn page_source_and_sqlite_reader_preserve_authentication_failures() {
-    for case in FIXTURE_CASES {
-        let context = case.name;
-        let pages = SqlCipherReader::open(
-            SliceSource::new(case.encrypted),
-            case.config(),
-            b"wrong passphrase",
-        )
-        .unwrap();
-        let mut output = vec![0xaa; case.page_size];
-        let error = sqlite_reader::PageSource::read_page_into(&pages, NonZeroU32::MIN, &mut output)
-            .unwrap_err();
-        assert!(
-            matches!(
-                error,
-                ReaderError::Decrypt(DecryptError::AuthenticationFailed { page_no: 1 })
-            ),
-            "{context}: {error:?}"
-        );
-        assert!(
-            output.iter().all(|byte| *byte == 0),
-            "{context}: output not cleared"
-        );
-        assert!(
-            matches!(
-                sqlite_reader::Reader::open(pages),
-                Err(sqlite_reader::ReaderError::Source(ReaderError::Decrypt(
-                    DecryptError::AuthenticationFailed { page_no: 1 }
-                )))
-            ),
-            "{context}: SQLite reader did not preserve page 1 authentication failure"
-        );
-
-        let reader = sqlite_reader::Reader::open(case.reader()).unwrap();
-        let index_page = reader
-            .index("people_name_idx")
-            .unwrap()
-            .schema_object()
-            .root_page;
-        let last_page = u32::try_from(case.encrypted.len() / case.page_size).unwrap();
-        // The final page belongs to the large BLOB's overflow chain. Reading
-        // earlier rows succeeds, but no partial large row may escape.
-        for page in [index_page, last_page] {
-            let context = format!("{} corrupted page {page}", case.name);
-            let mut bytes = case.encrypted.to_vec();
-            bytes[(page as usize - 1) * case.page_size + 16] ^= 1;
-            let pages =
-                SqlCipherReader::open(SliceSource::new(&bytes), case.config(), case.passphrase)
-                    .unwrap();
-            output.fill(0xaa);
-            sqlite_reader::PageSource::read_page_into(
-                &pages,
-                NonZeroU32::new(page).unwrap(),
-                &mut output,
-            )
-            .unwrap_err();
-            assert!(
-                output.iter().all(|byte| *byte == 0),
-                "{context}: output not cleared"
-            );
-            let reader = sqlite_reader::Reader::open(pages).unwrap();
-            let error = if page == index_page {
-                let index = reader.index("people_name_idx").unwrap();
-                let mut entries = index.entries();
-                let error = entries.next().unwrap().unwrap_err();
-                assert!(
-                    entries.next().is_none(),
-                    "{context}: index iterator not terminated"
-                );
-                error
-            } else {
-                let table = reader.table("binary_samples").unwrap();
-                let mut rows = table.rows();
-                assert!(
-                    rows.next().unwrap().is_ok(),
-                    "{context}: preceding row failed"
-                );
-                let error = rows.next().unwrap().unwrap_err();
-                assert!(
-                    rows.next().is_none(),
-                    "{context}: row iterator not terminated"
-                );
-                error
-            };
-            assert!(
-                matches!(error,
-                    sqlite_reader::ReaderError::Source(ReaderError::Decrypt(
-                        DecryptError::AuthenticationFailed { page_no }
-                    )) if page_no == page
-                ),
-                "{context}: {error:?}"
-            );
-        }
-    }
-}
-
-#[test]
 fn authenticates_and_restores_supported_fixtures() {
     for case in FIXTURE_CASES {
-        let reader = case.reader();
+        let reader = SqlCipherReader::open(
+            SliceSource::new(case.encrypted),
+            case.config(),
+            case.passphrase,
+        )
+        .unwrap_or_else(|error| panic!("{} reader failed to open: {error}", case.name));
         let expected_page_count = case.encrypted.len() / case.page_size;
 
         assert_eq!(reader.page_size(), case.page_size, "{}", case.name);
@@ -185,7 +93,12 @@ fn authenticates_and_restores_supported_fixtures() {
 fn reads_matching_ranges_from_slice_and_file_sources() {
     for case in FIXTURE_CASES {
         let context = case.name;
-        let slice_reader = case.reader();
+        let slice_reader = SqlCipherReader::open(
+            SliceSource::new(case.encrypted),
+            case.config(),
+            case.passphrase,
+        )
+        .unwrap_or_else(|error| panic!("{} reader failed to open: {error}", case.name));
         let file_reader = SqlCipherReader::open(
             FileSource::open(case.path())
                 .unwrap_or_else(|error| panic!("{context} file source: {error}")),
@@ -317,7 +230,12 @@ fn rejects_page_tampering_and_relocation_without_exposing_plaintext() {
 #[test]
 fn ignores_sqlcipher3_unauthenticated_filler() {
     let case = SQLCIPHER3_CASE;
-    let original_reader = case.reader();
+    let original_reader = SqlCipherReader::open(
+        SliceSource::new(case.encrypted),
+        case.config(),
+        case.passphrase,
+    )
+    .unwrap_or_else(|error| panic!("{} reader failed to open: {error}", case.name));
     let mut tampered = case.encrypted.to_vec();
 
     for page in tampered.chunks_exact_mut(case.page_size) {

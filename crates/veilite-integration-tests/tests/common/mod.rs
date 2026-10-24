@@ -1,4 +1,4 @@
-use veilite_core::{CipherConfig, CipherPreset, HashAlgorithm, SliceSource, SqlCipherReader};
+use veilite_core::{CipherConfig, CipherPreset, HashAlgorithm};
 
 #[derive(Debug, Clone, Copy)]
 pub enum FixtureCipher {
@@ -26,15 +26,6 @@ impl FixtureCase {
                     .expect("custom fixture configuration is valid")
             }
         }
-    }
-
-    pub fn reader(self) -> SqlCipherReader<SliceSource<'static>> {
-        SqlCipherReader::open(
-            SliceSource::new(self.encrypted),
-            self.config(),
-            self.passphrase,
-        )
-        .unwrap_or_else(|error| panic!("{} reader failed to open: {error}", self.name))
     }
 }
 

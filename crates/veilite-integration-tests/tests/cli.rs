@@ -98,7 +98,12 @@ impl Drop for CliFixture {
 fn cli_verifies_and_exports_every_page() {
     for case in FIXTURE_CASES {
         let fixture = CliFixture::new(case);
-        let reader = case.reader();
+        let reader = SqlCipherReader::open(
+            SliceSource::new(case.encrypted),
+            case.config(),
+            case.passphrase,
+        )
+        .unwrap_or_else(|error| panic!("{} reader failed to open: {error}", case.name));
         assert!(
             reader.page_count() > 1,
             "{} needs multiple pages",

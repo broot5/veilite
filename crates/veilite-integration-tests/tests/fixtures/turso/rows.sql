@@ -1,0 +1,9 @@
+CREATE TABLE nullable(a TEXT, b TEXT);
+INSERT INTO nullable VALUES(NULL, 'x');
+CREATE TABLE alias_later(label TEXT, id INTEGER PRIMARY KEY);
+INSERT INTO alias_later VALUES('x', 42);
+CREATE TABLE defaults(a TEXT);
+INSERT INTO defaults VALUES('x');
+ALTER TABLE defaults ADD COLUMN b INTEGER DEFAULT 7;
+CREATE TABLE reordered(a TEXT, b TEXT, PRIMARY KEY(b, a)) WITHOUT ROWID;
+INSERT INTO reordered VALUES('A', 'B');

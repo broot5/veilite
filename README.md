@@ -10,8 +10,8 @@ OpenSSL. Rust 1.89 or newer is required.
 
 - `sqlite-source` provides shared byte and page source interfaces. See its
   [README](crates/sqlite-source/README.md).
-- `sqlite-reader` provides independent schema, table, and index reads for
-  plaintext SQLite snapshots. See its [README](crates/sqlite-reader/README.md).
+- `veilite-turso` runs SQL queries over encrypted snapshots using Turso. See its
+  [README](crates/veilite-turso/README.md).
 - `veilite-core` provides authenticated random-access page reads and
   AES-256-CBC decryption.
 - `veilite` is the command-line interface for inspecting, verifying, and
@@ -100,11 +100,16 @@ Opening a reader derives keys but does not authenticate the entire database.
 Pages are authenticated as they are read; use `veilite verify` for a full
 check.
 
-`SqlCipherReader` also implements `sqlite_reader::PageSource`. Pass it to
-`sqlite_reader::Reader::open` to read schema, tables, and indexes without a SQL
-engine. Opening the SQLite reader authenticates page 1; subsequent pages are
-authenticated as they are read. This requires the same complete, immutable
-main database snapshot described above.
+### `veilite-turso`
+
+Use `veilite_turso::open_readonly(path, config, passphrase)` to obtain a native
+Turso connection. See the [binding and query example](crates/veilite-turso/README.md).
+
+The pinned Turso engine requires UTF-8 database text and does not support STORED
+generated columns. These restrictions apply to SQL queries through
+`veilite-turso`; core page reading and the CLI do not use the SQL engine.
+Use trusted SQL with the native connection. Read-only protection covers the
+encrypted main file; the connection is not a sandbox for other file access.
 
 ## License
 

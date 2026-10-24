@@ -18,4 +18,5 @@ veilite-core.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-sqlite-reader.workspace = true
+tempfile.workspace = true
+veilite-turso.workspace = true

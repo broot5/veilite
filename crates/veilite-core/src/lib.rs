@@ -9,8 +9,8 @@
 //! is decrypted only after its stored HMAC has been verified.
 //!
 //! [`SqlCipherReader`] implements [`sqlite_source::PageSource`], which can also
-//! be consumed by the separately added `sqlite-reader` crate to read schema,
-//! tables, and indexes. The caller must provide a complete, checkpointed
+//! be consumed by independent page readers. [`PageDecryptor`] supports
+//! storage-engine adapters such as `veilite-turso`. Provide a checkpointed
 //! snapshot that needs no WAL or journal.
 //!
 //! ```no_run
@@ -33,6 +33,6 @@ mod decryptor;
 mod reader;
 
 pub use config::{CipherConfig, CipherConfigError, CipherPreset, HashAlgorithm};
-pub use decryptor::DecryptError;
+pub use decryptor::{DecryptError, PageDecryptor};
 pub use reader::{ReaderError, SqlCipherReader};
 pub use sqlite_source::{FileSource, ReadAt, SliceSource};

@@ -19,11 +19,12 @@ struct KeyMaterial {
     hmac_key: [u8; 32],
 }
 
-/// Internal authenticated page decryptor.
+/// Authenticated SQLCipher page decryptor for storage-engine adapters.
 ///
-/// Most callers should use [`crate::SqlCipherReader`], which validates source
-/// length and page numbers before invoking the decryptor.
-pub(super) struct PageDecryptor {
+/// Derives keys once and authenticates complete pages independently of a file.
+/// Callers must enforce snapshot immutability and physical page bounds. For
+/// file or byte-range reads, use [`crate::SqlCipherReader`] instead.
+pub struct PageDecryptor {
     config: CipherConfig,
     keys: KeyMaterial,
 }
@@ -31,6 +32,14 @@ pub(super) struct PageDecryptor {
 /// Error returned while deriving keys or authenticating and decrypting a page.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum DecryptError {
+    /// A supplied buffer does not contain exactly one configured page.
+    #[error("invalid encrypted page length: expected {expected} bytes, got {actual}")]
+    InvalidPageLength {
+        /// Required physical page size.
+        expected: usize,
+        /// Supplied buffer length.
+        actual: usize,
+    },
     /// An empty passphrase was supplied.
     #[error("the passphrase is empty")]
     EmptyPassphrase,
@@ -67,7 +76,7 @@ pub enum DecryptError {
 
 impl PageDecryptor {
     /// Derives page encryption and HMAC keys from a passphrase and database salt.
-    pub(super) fn new(
+    pub fn new(
         config: CipherConfig,
         passphrase: &[u8],
         salt: &[u8; 16],
@@ -105,23 +114,28 @@ impl PageDecryptor {
 
     /// Returns the configured physical page size in bytes.
     #[must_use]
-    pub(super) const fn page_size(&self) -> usize {
+    pub const fn page_size(&self) -> usize {
         self.config.page_size()
     }
 
     /// Authenticates and decrypts one physical page in place.
     ///
-    /// The page buffer is cleared if authentication or header validation fails.
-    pub(super) fn decrypt_page_in_place(
+    /// `page` must contain exactly [`Self::page_size`] bytes. The buffer is
+    /// cleared on every error, including a length mismatch. Page numbers are
+    /// one-based; this API does not know the physical file length.
+    pub fn decrypt_page_in_place(
         &self,
         page_no: NonZeroU32,
         page: &mut [u8],
     ) -> Result<(), DecryptError> {
-        debug_assert_eq!(
-            page.len(),
-            self.config.page_size(),
-            "reader must provide exactly one encrypted page"
-        );
+        if page.len() != self.page_size() {
+            let actual = page.len();
+            page.zeroize();
+            return Err(DecryptError::InvalidPageLength {
+                expected: self.page_size(),
+                actual,
+            });
+        }
 
         let result = self.decrypt_page_in_place_inner(page_no, page);
         if result.is_err() {

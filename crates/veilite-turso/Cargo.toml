@@ -1,0 +1,18 @@
+[package]
+name = "veilite-turso"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Read-only Turso SQL queries over immutable SQLCipher snapshots"
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["sqlcipher", "sqlite", "turso"]
+categories = ["cryptography", "database"]
+
+[dependencies]
+sha2.workspace = true
+thiserror.workspace = true
+turso_core.workspace = true
+veilite-core.workspace = true
+zeroize.workspace = true

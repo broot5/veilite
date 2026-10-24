@@ -6,6 +6,23 @@ use hmac::{KeyInit, Mac};
 use super::*;
 
 #[test]
+fn public_decoder_rejects_and_clears_wrong_length_buffers() {
+    let config = CipherConfig::new(1024, 1, HashAlgorithm::Sha256, HashAlgorithm::Sha256).unwrap();
+    let decoder = PageDecryptor::new(config, b"test", &[0; 16]).unwrap();
+    for length in [0, 1, 1023, 1025, 2048] {
+        let mut page = vec![0xaa; length];
+        assert_eq!(
+            decoder.decrypt_page_in_place(NonZeroU32::MIN, &mut page),
+            Err(DecryptError::InvalidPageLength {
+                expected: 1024,
+                actual: length
+            })
+        );
+        assert!(page.iter().all(|b| *b == 0));
+    }
+}
+
+#[test]
 fn rejects_empty_passphrase() {
     for config in [
         CipherConfig::from(crate::CipherPreset::SqlCipher3),
