@@ -343,8 +343,12 @@ fn open_reader(
 ) -> Result<SqlCipherReader<FileSource>, Box<dyn Error>> {
     let config = cipher.config()?;
     check_companion_files(path)?;
+    let resolved = path
+        .canonicalize()
+        .map_err(|source| path_io_error("failed to resolve encrypted database", path, source))?;
+    check_companion_files(&resolved)?;
     let passphrase = read_passphrase(passphrase_args)?;
-    let source = open_encrypted_database(path)?;
+    let source = open_encrypted_database(&resolved)?;
     let reader = SqlCipherReader::open(source, config, passphrase.as_slice())?;
     drop(passphrase);
     Ok(reader)
@@ -371,8 +375,13 @@ fn inspect(args: InspectArgs) -> Result<(), Box<dyn Error>> {
     let page_size = config.page_size() as u64;
     validate_encrypted_file_size(file_size, page_size)?;
 
-    let wal_path = companion_path(&args.input_path, "-wal");
-    let journal_path = companion_path(&args.input_path, "-journal");
+    let resolved = args.input_path.canonicalize().map_err(|source| {
+        path_io_error(
+            "failed to resolve encrypted database",
+            &args.input_path,
+            source,
+        )
+    })?;
     let stdout = io::stdout();
     let mut output = stdout.lock();
 
@@ -399,8 +408,16 @@ fn inspect(args: InspectArgs) -> Result<(), Box<dyn Error>> {
     )?;
     writeln!(output, "reserve size: {} bytes", config.reserve_size())?;
     writeln!(output, "page count: {}", file_size / page_size)?;
-    writeln!(output, "WAL: {}", presence(&wal_path)?)?;
-    writeln!(output, "journal: {}", presence(&journal_path)?)?;
+    writeln!(
+        output,
+        "WAL: {}",
+        presence(&args.input_path, &resolved, "-wal")?
+    )?;
+    writeln!(
+        output,
+        "journal: {}",
+        presence(&args.input_path, &resolved, "-journal")?
+    )?;
     Ok(())
 }
 
@@ -488,9 +505,7 @@ fn companion_path(path: &Path, suffix: &str) -> PathBuf {
 fn check_companion_files(path: &Path) -> io::Result<()> {
     for (suffix, kind) in [("-wal", "WAL"), ("-journal", "rollback journal")] {
         let companion = companion_path(path, suffix);
-        if companion.try_exists().map_err(|source| {
-            path_io_error("failed to inspect companion file", &companion, source)
-        })? {
+        if companion_exists(&companion)? {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("SQLCipher {kind} companion file is unsupported: {companion:?}"),
@@ -500,10 +515,23 @@ fn check_companion_files(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn presence(path: &Path) -> io::Result<&'static str> {
-    path.try_exists()
-        .map_err(|source| path_io_error("failed to inspect companion file", path, source))
-        .map(|exists| if exists { "present" } else { "absent" })
+fn companion_exists(path: &Path) -> io::Result<bool> {
+    // A dangling symlink is still a companion directory entry.
+    match path.symlink_metadata() {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(path_io_error(
+            "failed to inspect companion file",
+            path,
+            error,
+        )),
+    }
+}
+
+fn presence(path: &Path, resolved: &Path, suffix: &str) -> io::Result<&'static str> {
+    let exists = companion_exists(&companion_path(path, suffix))?
+        || companion_exists(&companion_path(resolved, suffix))?;
+    Ok(if exists { "present" } else { "absent" })
 }
 
 fn main() {

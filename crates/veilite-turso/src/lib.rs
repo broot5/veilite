@@ -98,35 +98,34 @@ pub fn open_readonly(
     let size = source.len()?;
     let page_size = config.page_size();
     let page_size_u64 = page_size as u64;
-    let invalid = if size == 0 {
-        Some(ReaderError::EmptyFile)
-    } else if size < page_size_u64 {
-        Some(ReaderError::FileTooSmall {
+    if size == 0 {
+        return Err(ReaderError::EmptyFile.into());
+    }
+    if size < page_size_u64 {
+        return Err(ReaderError::FileTooSmall {
             file_size: size,
             page_size,
-        })
-    } else if !size.is_multiple_of(page_size_u64) {
-        Some(ReaderError::InvalidFileSize {
+        }
+        .into());
+    }
+    if !size.is_multiple_of(page_size_u64) {
+        return Err(ReaderError::InvalidFileSize {
             file_size: size,
             page_size,
-        })
-    } else {
-        None
-    };
-    if let Some(error) = invalid {
-        return Err(OpenError::Source(error));
+        }
+        .into());
     }
     let count = size / page_size_u64;
     let page_count = u32::try_from(count)
         .map_err(|_| OpenError::Source(ReaderError::TooManyPages { page_count: count }))?;
+    let mut first_page = Zeroizing::new(vec![0; page_size]);
+    source.read_exact_at(0, &mut first_page)?;
     let mut salt = [0; 16];
-    source.read_exact_at(0, &mut salt)?;
+    salt.copy_from_slice(&first_page[..16]);
     let decoder = PageDecryptor::new(config, passphrase, &salt)?;
 
     // Always authenticate with this caller's key, before Turso can reuse any
     // schema or database state from its process-wide file registry.
-    let mut first_page = Zeroizing::new(vec![0; page_size]);
-    source.read_exact_at(0, &mut first_page)?;
     decoder.decrypt_page_in_place(NonZeroU32::MIN, &mut first_page)?;
     drop(first_page);
 

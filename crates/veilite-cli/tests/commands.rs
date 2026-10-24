@@ -72,6 +72,71 @@ fn companion_preflight_precedes_passphrase_and_database_access() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn companions_at_input_and_symlink_target_are_detected() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TemporaryDirectory::new();
+    let target = temp.0.join("target.db");
+    let input = temp.0.join("alias.db");
+    let destination = temp.0.join("output.db");
+    let missing_key = temp.0.join("missing.key");
+    fs::write(&target, vec![0; 4096]).unwrap();
+    symlink(&target, &input).unwrap();
+
+    for base in [&input, &target] {
+        for suffix in ["-wal", "-journal"] {
+            let mut companion = base.as_os_str().to_owned();
+            companion.push(suffix);
+            let companion = PathBuf::from(companion);
+            for dangling in [false, true] {
+                if dangling {
+                    symlink(temp.0.join("missing-companion"), &companion).unwrap();
+                } else {
+                    fs::write(&companion, []).unwrap();
+                }
+                for command in ["verify", "export"] {
+                    let mut args = vec![
+                        command,
+                        "--preset",
+                        "4",
+                        "--passphrase-file",
+                        missing_key.to_str().unwrap(),
+                        input.to_str().unwrap(),
+                    ];
+                    if command == "export" {
+                        args.push(destination.to_str().unwrap());
+                    }
+                    let output = cli(&args);
+                    assert_eq!(output.status.code(), Some(1));
+                    assert!(output.stdout.is_empty());
+                    let error = String::from_utf8(output.stderr).unwrap();
+                    assert!(error.contains("companion file is unsupported"), "{error}");
+                    assert!(error.contains(companion.to_str().unwrap()), "{error}");
+                    assert!(!destination.exists());
+                }
+                let output = cli(&["inspect", "--preset", "4", input.to_str().unwrap()]);
+                assert!(output.status.success());
+                assert!(output.stderr.is_empty());
+                let text = String::from_utf8(output.stdout).unwrap();
+                let expected = if suffix == "-wal" {
+                    "WAL: present"
+                } else {
+                    "journal: present"
+                };
+                assert!(text.contains(expected), "{text}");
+                fs::remove_file(&companion).unwrap();
+            }
+        }
+    }
+    let output = cli(&["inspect", "--preset", "4", input.to_str().unwrap()]);
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("WAL: absent"));
+    assert!(text.contains("journal: absent"));
+}
+
 #[test]
 fn invalid_configuration_is_reported_before_file_access() {
     let output = cli(&[
