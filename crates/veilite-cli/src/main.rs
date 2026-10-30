@@ -8,10 +8,11 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use veilite_core::{CipherConfig, CipherPreset, FileSource, HashAlgorithm, SqlCipherReader};
+use veilite_turso::snapshot::{WalInput, WalSnapshot};
 use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Debug, Parser)]
-#[command(version, about = "Read immutable SQLCipher main database snapshots")]
+#[command(version, about = "Read immutable SQLCipher database snapshots")]
 struct CliArgs {
     #[command(subcommand)]
     command: Command,
@@ -21,8 +22,8 @@ struct CliArgs {
 enum Command {
     /// Export an encrypted database as a plaintext SQLite image
     ///
-    /// Input must be an immutable main database snapshot. Sibling -wal and
-    /// -journal files are rejected.
+    /// Input must be immutable. Use --wal for a consistent DB/WAL pair;
+    /// otherwise WAL is rejected. Rollback journals are always rejected.
     Export(ExportArgs),
 
     /// Show encrypted database and cipher configuration information
@@ -31,10 +32,10 @@ enum Command {
     /// reading a passphrase.
     Inspect(InspectArgs),
 
-    /// Authenticate every encrypted database page
+    /// Authenticate every page of the selected database image
     ///
-    /// Input must be an immutable main database snapshot. Sibling -wal and
-    /// -journal files are rejected.
+    /// Input must be immutable. Use --wal for a consistent DB/WAL pair;
+    /// otherwise WAL is rejected. Rollback journals are always rejected.
     Verify(VerifyArgs),
 }
 
@@ -45,6 +46,10 @@ struct ExportArgs {
 
     #[command(flatten)]
     passphrase: PassphraseArgs,
+
+    /// Read the last valid commit from the required sibling WAL; invalid tails may be ignored
+    #[arg(long)]
+    wal: bool,
 
     /// SQLCipher encrypted main database
     #[arg(value_name = "ENCRYPTED_DB")]
@@ -72,6 +77,10 @@ struct VerifyArgs {
 
     #[command(flatten)]
     passphrase: PassphraseArgs,
+
+    /// Read the last valid commit from the required sibling WAL; invalid tails may be ignored
+    #[arg(long)]
+    wal: bool,
 
     /// SQLCipher encrypted main database
     #[arg(value_name = "ENCRYPTED_DB")]
@@ -267,6 +276,17 @@ fn run() -> Result<(), Box<dyn Error>> {
 }
 
 fn export(args: ExportArgs) -> Result<(), Box<dyn Error>> {
+    if args.wal {
+        let snapshot = open_wal_snapshot(&args.input_path, &args.cipher, &args.passphrase)?;
+        let count = snapshot.page_count();
+        write_wal_database(&args.output_path, snapshot)?;
+        writeln!(
+            io::stdout().lock(),
+            "decrypted {count} snapshot pages to {}",
+            args.output_path.display()
+        )?;
+        return Ok(());
+    }
     let reader = open_reader(&args.input_path, &args.cipher, &args.passphrase)?;
 
     write_decrypted_database(&args.output_path, &reader)?;
@@ -284,15 +304,7 @@ fn write_decrypted_database(
     path: &Path,
     reader: &SqlCipherReader<FileSource>,
 ) -> Result<(), Box<dyn Error>> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-
-    let mut file = options
-        .open(path)
-        .map_err(|source| path_io_error("failed to create export", path, source))?;
-    let result = (|| -> Result<(), Box<dyn Error>> {
+    write_plaintext_file(path, |file| {
         let mut plaintext_page = Zeroizing::new(vec![0; reader.page_size()]);
         for page_no in 1..=reader.page_count() {
             let page_no = nonzero_page_number(page_no)?;
@@ -300,16 +312,61 @@ fn write_decrypted_database(
             file.write_all(&plaintext_page)
                 .map_err(|source| path_io_error("failed to write export", path, source))?;
         }
-        file.sync_all()
-            .map_err(|source| path_io_error("failed to sync export", path, source))?;
         Ok(())
-    })();
+    })
+}
 
+fn write_wal_database(path: &Path, snapshot: WalSnapshot) -> Result<(), Box<dyn Error>> {
+    write_plaintext_file(path, |file| {
+        snapshot.visit_pages(|number, page| {
+            if number.get() == 1 {
+                // A merged standalone image must not require an output WAL.
+                let mut header = Zeroizing::new(page.to_vec());
+                header[18] = 1;
+                header[19] = 1;
+                file.write_all(&header)
+            } else {
+                file.write_all(page)
+            }
+            .map_err(|source| path_io_error("failed to write export", path, source))
+        })?;
+        Ok(())
+    })
+}
+
+fn write_plaintext_file(
+    path: &Path,
+    write_pages: impl FnOnce(&mut fs::File) -> Result<(), Box<dyn Error>>,
+) -> Result<(), Box<dyn Error>> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
+        .open(path)
+        .map_err(|source| path_io_error("failed to create export", path, source))?;
+    let result = write_pages(&mut file).and_then(|()| {
+        file.sync_all()
+            .map_err(|source| path_io_error("failed to sync export", path, source).into())
+    });
     if let Err(error) = result {
         drop(file);
         return Err(cleanup_failed_export(path, error));
     }
     Ok(())
+}
+
+fn open_wal_snapshot(
+    path: &Path,
+    cipher: &CipherArgs,
+    passphrase_args: &PassphraseArgs,
+) -> Result<WalSnapshot, Box<dyn Error>> {
+    let config = cipher.config()?;
+    let input = WalInput::open(path)?;
+    let passphrase = read_passphrase(passphrase_args)?;
+    let snapshot = input.snapshot(config, passphrase.as_slice())?;
+    drop(passphrase);
+    Ok(snapshot)
 }
 
 fn cleanup_failed_export(path: &Path, export_error: Box<dyn Error>) -> Box<dyn Error> {
@@ -422,6 +479,13 @@ fn inspect(args: InspectArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn verify(args: VerifyArgs) -> Result<(), Box<dyn Error>> {
+    if args.wal {
+        let snapshot = open_wal_snapshot(&args.input_path, &args.cipher, &args.passphrase)?;
+        let count = snapshot.page_count();
+        snapshot.visit_pages(|_, _| Ok(()))?;
+        writeln!(io::stdout().lock(), "verified {count} snapshot pages")?;
+        return Ok(());
+    }
     let reader = open_reader(&args.input_path, &args.cipher, &args.passphrase)?;
     let mut plaintext_page = Zeroizing::new(vec![0; reader.page_size()]);
 

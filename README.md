@@ -8,8 +8,7 @@ OpenSSL. Rust 1.89 or newer is required.
 
 ## Components
 
-- `veilite-turso` runs SQL queries over encrypted snapshots using Turso. See its
-  [README](crates/veilite-turso/README.md).
+- `veilite-turso` queries encrypted snapshots, including WAL, using Turso. See its [README](crates/veilite-turso/README.md).
 - `veilite-core` provides authenticated random-access page reads and
   AES-256-CBC decryption.
 - `veilite` is the command-line interface for inspecting, verifying, and
@@ -22,10 +21,13 @@ can select the page size, KDF iteration count, PBKDF2-HMAC algorithm, and page
 HMAC algorithm. The profile or complete custom configuration must be supplied
 explicitly; it is not auto-detected.
 
-Input must be an immutable main database snapshot created after all transactions
-have completed and the originating application has checkpointed and cleanly
-closed the database. Removing existing `-wal` or `-journal` files does not
-produce a valid snapshot.
+Input must be immutable: a checkpointed, cleanly closed main database, or a
+consistent main database and sibling `-wal` in explicit WAL mode. Copying files
+while a writer is active or removing companions does not ensure a valid snapshot.
+
+WAL mode reads Turso's last valid commit. Invalid or incomplete tails may be
+ignored; empty or short WAL files may yield main-only state. Authentication
+and I/O errors fail the operation.
 
 Live databases, writes to encrypted databases, database creation, rekeying,
 SQLCipher 1 or 2 presets, raw keys, disabled page HMACs, and plaintext headers
@@ -50,6 +52,10 @@ veilite verify --preset 4 encrypted.db
 
 # Export a plaintext SQLite image
 veilite export --preset 4 encrypted.db plaintext.db
+
+# Read a consistent, immutable encrypted.db + encrypted.db-wal pair
+veilite verify --wal --preset 4 encrypted.db
+veilite export --wal --preset 4 encrypted.db plaintext.db
 ```
 
 For a custom configuration, supply all four cipher parameters explicitly:
@@ -63,17 +69,18 @@ veilite verify --custom \
   encrypted.db
 ```
 
-`verify` and `export` prompt for a passphrase. Use
-`--passphrase-file FILE` to read it from the first line of a file. `inspect`
-reports sibling `-wal` and `-journal` files; the other commands reject them.
+`verify` and `export` prompt for a passphrase, or read the first line of
+`--passphrase-file FILE`. `inspect` reports WAL and journal companions.
+Other commands reject WAL unless `--wal` is supplied; rollback journals are
+always rejected. WAL must be a regular file beside the canonical main path,
+with no conflicting WAL beside a symlink alias.
 
-`export` does not overwrite an existing destination. Run `veilite help` or
-`veilite <command> --help` for the full CLI reference.
+`verify` authenticates every main-file page, or every selected snapshot page
+with `--wal`, including unused pages. It does not audit WAL history or prove
+logical integrity, completeness, or freshness.
 
-`verify` authenticates every physical page present in the file; it does not
-establish SQLite logical integrity or prove that the snapshot is complete or
-current. Removing whole pages from the end may not be detected by authentication
-of the remaining pages.
+`export` creates a standalone plaintext SQLite image without overwriting an
+existing destination. Run `veilite <command> --help` for all options.
 
 ## Libraries
 
@@ -100,14 +107,14 @@ check.
 
 ### `veilite-turso`
 
-Use `veilite_turso::open_readonly(path, config, passphrase)` to obtain a native
-Turso connection. See the [binding and query example](crates/veilite-turso/README.md).
+Use `veilite_turso::open_readonly` for a main-only snapshot or
+`open_readonly_with_wal` for a DB/WAL pair. Both return a native Turso connection;
+`snapshot::WalInput` provides WAL snapshot page traversal. See the
+[usage and requirements](crates/veilite-turso/README.md).
 
-The pinned Turso engine requires UTF-8 database text and does not support STORED
-generated columns. These restrictions apply to SQL queries through
-`veilite-turso`; core page reading and the CLI do not use the SQL engine.
-Use trusted SQL with the native connection. Read-only protection covers the
-encrypted main file; the connection is not a sandbox for other file access.
+Turso queries and CLI `--wal` require UTF-8 paths and database text, and do not
+support STORED generated columns. Use trusted SQL: read-only input protection
+is not a sandbox for other file access.
 
 ## License
 

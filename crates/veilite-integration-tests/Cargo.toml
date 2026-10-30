@@ -15,8 +15,8 @@ bench = false
 clap.workspace = true
 rpassword.workspace = true
 veilite-core.workspace = true
+veilite-turso.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-veilite-turso.workspace = true

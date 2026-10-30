@@ -10,6 +10,7 @@ pub(super) struct SqlCipherCodec {
     config: CipherConfig,
     id: PageCodecId,
     page_count: u32,
+    wal_page_limit: Option<u32>,
 }
 
 impl SqlCipherCodec {
@@ -18,9 +19,13 @@ impl SqlCipherCodec {
         config: CipherConfig,
         salt: [u8; 16],
         page_count: u32,
+        wal_pages: Option<u32>,
+        wal_identity: Option<&str>,
     ) -> Self {
         // Non-secret format identity only. Authentication with each caller's
         // key is mandatory before entering Turso's shared database registry.
+        // Bind WAL mode to its canonical main path as well: hard links may
+        // share a main-file identity while naming different sibling WALs.
         let digest = Sha256::new()
             .chain_update(b"veilite-sqlcipher-codec-v1")
             .chain_update((config.page_size() as u32).to_le_bytes())
@@ -30,6 +35,8 @@ impl SqlCipherCodec {
                 algorithm_id(config.hmac_algorithm()),
             ])
             .chain_update(salt)
+            .chain_update([u8::from(wal_pages.is_some())])
+            .chain_update(wal_identity.unwrap_or_default().as_bytes())
             .finalize();
         let mut id = [0; 16];
         id.copy_from_slice(&digest[..16]);
@@ -38,6 +45,7 @@ impl SqlCipherCodec {
             config,
             id: PageCodecId::new(id),
             page_count,
+            wal_page_limit: wal_pages.map(|frames| page_count.saturating_add(frames)),
         }
     }
 }
@@ -84,11 +92,13 @@ impl PageCodec for SqlCipherCodec {
         output: &mut [u8],
     ) -> turso_core::Result<()> {
         output.zeroize();
-        if ctx.location != PageLocation::Database
-            || ctx.page_no > self.page_count
-            || input.len() != self.config.page_size()
-            || output.len() != input.len()
-        {
+        let in_range = match ctx.location {
+            PageLocation::Database => ctx.page_no <= self.page_count,
+            PageLocation::Wal => self
+                .wal_page_limit
+                .is_some_and(|limit| ctx.page_no <= limit),
+        };
+        if !in_range || input.len() != self.config.page_size() || output.len() != input.len() {
             return Err(turso_core::LimboError::InvalidArgument(
                 "unsupported SQLCipher page source, number, or length".into(),
             ));
@@ -112,6 +122,8 @@ mod tests {
             config,
             salt,
             2,
+            None,
+            None,
         )
     }
 

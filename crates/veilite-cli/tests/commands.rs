@@ -25,6 +25,40 @@ fn exposes_snapshot_commands() {
 }
 
 #[test]
+fn wal_preflight_precedes_passphrase_and_requires_explicit_mode() {
+    let temp = TemporaryDirectory::new();
+    let db = temp.0.join("input.db");
+    let key = temp.0.join("missing.key");
+    fs::write(&db, vec![0; 4096]).unwrap();
+    for command in ["verify", "export"] {
+        let mut args = vec![
+            command,
+            "--wal",
+            "--preset",
+            "4",
+            "--passphrase-file",
+            key.to_str().unwrap(),
+            db.to_str().unwrap(),
+        ];
+        let output = temp.0.join("output.db");
+        if command == "export" {
+            args.push(output.to_str().unwrap());
+        }
+        let result = cli(&args);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("failed to inspect WAL"));
+        assert!(!String::from_utf8_lossy(&result.stderr).contains("missing.key"));
+        assert!(!output.exists());
+    }
+    assert_eq!(
+        cli(&["inspect", "--wal", "--preset", "4", db.to_str().unwrap()])
+            .status
+            .code(),
+        Some(2)
+    );
+}
+
+#[test]
 fn companion_preflight_precedes_passphrase_and_database_access() {
     let temp = TemporaryDirectory::new();
     // Main DB and passphrase intentionally do not exist. Companion rejection
