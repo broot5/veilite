@@ -10,9 +10,12 @@ const AES_BLOCK_SIZE: usize = 16;
 impl FixtureCase {
     fn path(self) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures")
-            .join(self.name)
-            .join("encrypted.db")
+            .join("tests/fixtures/sqlcipher")
+            .join(match self.cipher {
+                FixtureCipher::SqlCipher3 => "3.db",
+                FixtureCipher::SqlCipher4 => "4.db",
+                FixtureCipher::Custom => "custom.db",
+            })
     }
 
     fn reserve_size(self) -> usize {

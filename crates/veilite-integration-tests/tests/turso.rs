@@ -1,4 +1,6 @@
 mod common;
+#[path = "common/files.rs"]
+mod files;
 
 use common::{FIXTURE_CASES, SQLCIPHER3_CASE};
 use std::{num::NonZeroUsize, path::Path, sync::Arc};
@@ -19,10 +21,7 @@ fn strings(conn: &Arc<turso::Connection>, sql: &str) -> turso::Result<Vec<Vec<St
 }
 
 fn unchanged(path: &Path, bytes: &[u8]) {
-    assert_eq!(std::fs::read(path).unwrap(), bytes);
-    for suffix in ["-wal", "-journal", "-shm"] {
-        assert!(!Path::new(&format!("{}{suffix}", path.display())).exists());
-    }
+    files::assert_preserved(path, bytes, None);
 }
 
 #[test]
@@ -33,9 +32,26 @@ fn queries_presets_and_custom_with_bindings_indexes_and_overflow() {
         std::fs::write(&path, case.encrypted).unwrap();
         let conn = open_readonly(&path, case.config(), case.passphrase)
             .unwrap_or_else(|error| panic!("{} failed to open: {error}", case.name));
-        assert_eq!(strings(&conn,
-            "SELECT CAST(id AS TEXT),name,coalesce(note,'NULL'),CAST(score AS TEXT),CAST(active AS TEXT) FROM people ORDER BY id").unwrap(),
-            vec![vec!["1","Alice","plain ASCII","98.5","1"], vec!["2","홍길동","한국어, emoji 🔐, and 'quotes'","-12.25","1"], vec!["3","Null Tester","NULL","0.0","0"]]);
+        let sql = "SELECT CAST(id AS TEXT), name, coalesce(note,'NULL'),
+                          CAST(score AS TEXT), CAST(active AS TEXT)
+                   FROM people ORDER BY id";
+        let expected = vec![
+            vec!["1", "Alice", "plain ASCII", "98.5", "1"],
+            vec![
+                "2",
+                "홍길동",
+                "한국어, emoji 🔐, and 'quotes'",
+                "-12.25",
+                "1",
+            ],
+            vec!["3", "Null Tester", "NULL", "0.0", "0"],
+        ];
+        assert_eq!(
+            strings(&conn, sql).unwrap(),
+            expected,
+            "{}: people rows",
+            case.name
+        );
         let mut statement = conn
             .prepare("SELECT id FROM people INDEXED BY people_name_idx WHERE name=?1")
             .unwrap();
@@ -49,13 +65,13 @@ fn queries_presets_and_custom_with_bindings_indexes_and_overflow() {
                 Ok(())
             })
             .unwrap();
-        assert_eq!(ids, [2]);
+        assert_eq!(ids, [2], "{}: indexed binding", case.name);
         statement.reset().unwrap();
         statement
             .bind_at(NonZeroUsize::MIN, turso::Value::Text("absent".into()))
             .unwrap();
         statement
-            .run_with_row_callback(|_| panic!("missing key returned a row"))
+            .run_with_row_callback(|_| panic!("{}: missing key returned a row", case.name))
             .unwrap();
         assert_eq!(
             strings(
@@ -63,7 +79,9 @@ fn queries_presets_and_custom_with_bindings_indexes_and_overflow() {
                 "SELECT CAST(count(*) AS TEXT) FROM people p JOIN audit_log a ON a.person_id=p.id"
             )
             .unwrap(),
-            vec![vec!["3"]]
+            vec![vec!["3"]],
+            "{}: join count",
+            case.name
         );
 
         let pattern = (0..2000).map(|i| format!("{i:04}:")).collect::<String>();
@@ -83,25 +101,47 @@ fn queries_presets_and_custom_with_bindings_indexes_and_overflow() {
             vec![
                 vec![0, 1, 2, 3, 127, 128, 252, 253, 254, 255],
                 pattern.into_bytes()
-            ]
+            ],
+            "{}: blob values",
+            case.name
         );
+        let mut typed_rows = 0;
         conn.prepare("SELECT note, score, active FROM people WHERE id=3")
             .unwrap()
             .run_with_row_callback(|row| {
-                assert!(matches!(row.get_value(0), turso::Value::Null));
-                assert!(matches!(
-                    row.get_value(1),
-                    turso::Value::Numeric(turso::Numeric::Float(_))
-                ));
-                assert!(matches!(
-                    row.get_value(2),
-                    turso::Value::Numeric(turso::Numeric::Integer(0))
-                ));
+                typed_rows += 1;
+                assert!(
+                    matches!(row.get_value(0), turso::Value::Null),
+                    "{}: expected NULL",
+                    case.name
+                );
+                assert!(
+                    matches!(
+                        row.get_value(1),
+                        turso::Value::Numeric(turso::Numeric::Float(_))
+                    ),
+                    "{}: expected Float",
+                    case.name
+                );
+                assert!(
+                    matches!(
+                        row.get_value(2),
+                        turso::Value::Numeric(turso::Numeric::Integer(0))
+                    ),
+                    "{}: expected Integer(0)",
+                    case.name
+                );
                 Ok(())
             })
             .unwrap();
 
-        assert!(conn.prepare_execute_batch("DELETE FROM people").is_err());
+        assert_eq!(typed_rows, 1, "{}: typed row count", case.name);
+
+        assert!(
+            conn.prepare_execute_batch("DELETE FROM people").is_err(),
+            "{}: DELETE must fail",
+            case.name
+        );
         // The main file remains protected even if trusted callers disable the
         // connection-level query_only convenience setting.
         conn.set_query_only(false);

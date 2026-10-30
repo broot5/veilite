@@ -1,11 +1,7 @@
-use veilite_core::{CipherConfig, CipherPreset, HashAlgorithm};
+mod cipher;
 
-#[derive(Debug, Clone, Copy)]
-pub enum FixtureCipher {
-    SqlCipher3,
-    SqlCipher4,
-    Custom,
-}
+pub use cipher::FixtureCipher;
+use veilite_core::CipherConfig;
 
 #[derive(Clone, Copy)]
 pub struct FixtureCase {
@@ -18,21 +14,14 @@ pub struct FixtureCase {
 
 impl FixtureCase {
     pub fn config(self) -> CipherConfig {
-        match self.cipher {
-            FixtureCipher::SqlCipher3 => CipherPreset::SqlCipher3.into(),
-            FixtureCipher::SqlCipher4 => CipherPreset::SqlCipher4.into(),
-            FixtureCipher::Custom => {
-                CipherConfig::new(2048, 100_000, HashAlgorithm::Sha256, HashAlgorithm::Sha256)
-                    .expect("custom fixture configuration is valid")
-            }
-        }
+        self.cipher.config()
     }
 }
 
 pub const SQLCIPHER3_CASE: FixtureCase = FixtureCase {
     name: "sqlcipher3",
     cipher: FixtureCipher::SqlCipher3,
-    encrypted: include_bytes!("../../../../fixtures/sqlcipher3/encrypted.db"),
+    encrypted: include_bytes!("../fixtures/sqlcipher/3.db"),
     passphrase: b"veilite-sqlcipher3-test-key",
     page_size: 1024,
 };
@@ -40,7 +29,7 @@ pub const SQLCIPHER3_CASE: FixtureCase = FixtureCase {
 const SQLCIPHER4_CASE: FixtureCase = FixtureCase {
     name: "sqlcipher4",
     cipher: FixtureCipher::SqlCipher4,
-    encrypted: include_bytes!("../../../../fixtures/sqlcipher4/encrypted.db"),
+    encrypted: include_bytes!("../fixtures/sqlcipher/4.db"),
     passphrase: b"veilite-sqlcipher4-test-key",
     page_size: 4096,
 };
@@ -48,7 +37,7 @@ const SQLCIPHER4_CASE: FixtureCase = FixtureCase {
 const SQLCIPHER_CUSTOM_CASE: FixtureCase = FixtureCase {
     name: "sqlcipher-custom",
     cipher: FixtureCipher::Custom,
-    encrypted: include_bytes!("../../../../fixtures/sqlcipher-custom/encrypted.db"),
+    encrypted: include_bytes!("../fixtures/sqlcipher/custom.db"),
     passphrase: b"veilite-sqlcipher-custom-test-key",
     page_size: 2048,
 };

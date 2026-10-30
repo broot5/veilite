@@ -1,64 +1,39 @@
+#[path = "common/cli.rs"]
+mod cli_support;
 mod common;
 
 use common::{FIXTURE_CASES, FixtureCase, FixtureCipher};
-use std::{num::NonZeroU32, path::PathBuf};
+use std::num::NonZeroU32;
 use veilite_core::{SliceSource, SqlCipherReader};
 
 // Exercise the production CLI source through the integration-only binary target.
 // Full SQLCipher fixtures stay in this unpublished crate's test suite.
 struct CliFixture {
-    directory: PathBuf,
+    directory: tempfile::TempDir,
     case: FixtureCase,
 }
 
 impl CliFixture {
     fn new(case: FixtureCase) -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let directory = std::env::temp_dir().join(format!(
-            "veilite-integration-cli-{}-{id}",
-            std::process::id()
-        ));
-        std::fs::create_dir(&directory).unwrap_or_else(|error| {
-            panic!("{} create {}: {error}", case.name, directory.display())
-        });
-        std::fs::write(directory.join("input.db"), case.encrypted)
+        let directory = tempfile::Builder::new()
+            .prefix("veilite-integration-cli-")
+            .tempdir()
+            .unwrap_or_else(|error| panic!("{} temp directory: {error}", case.name));
+        std::fs::write(directory.path().join("input.db"), case.encrypted)
             .unwrap_or_else(|error| panic!("{} input setup: {error}", case.name));
-        std::fs::write(directory.join("passphrase"), case.passphrase)
+        std::fs::write(directory.path().join("passphrase"), case.passphrase)
             .unwrap_or_else(|error| panic!("{} passphrase setup: {error}", case.name));
         Self { directory, case }
     }
 
     fn run(&self, command: &str) -> std::process::Output {
         let mut cli = std::process::Command::new(env!("CARGO_BIN_EXE_veilite-test-cli"));
-        cli.arg(command);
-        match self.case.cipher {
-            FixtureCipher::SqlCipher3 => {
-                cli.args(["--preset", "3"]);
-            }
-            FixtureCipher::SqlCipher4 => {
-                cli.args(["--preset", "4"]);
-            }
-            FixtureCipher::Custom => {
-                cli.args([
-                    "--custom",
-                    "--page-size",
-                    "2048",
-                    "--kdf-iterations",
-                    "100000",
-                    "--kdf-algorithm",
-                    "sha256",
-                    "--hmac-algorithm",
-                    "sha256",
-                ]);
-            }
-        }
+        cli.arg(command).args(self.case.cipher.cli_options());
         cli.arg("--passphrase-file")
-            .arg(self.directory.join("passphrase"));
-        cli.arg(self.directory.join("input.db"));
+            .arg(self.directory.path().join("passphrase"));
+        cli.arg(self.directory.path().join("input.db"));
         if command == "export" {
-            cli.arg(self.directory.join("output.db"));
+            cli.arg(self.directory.path().join("output.db"));
         }
         cli.stdin(std::process::Stdio::null())
             .output()
@@ -77,20 +52,14 @@ impl CliFixture {
         let error = String::from_utf8(output.stderr)
             .unwrap_or_else(|error| panic!("{context}: invalid stderr: {error}"));
         assert!(
-            error.contains(&format!("page {page}")),
+            error.contains(&format!("page {page}:")),
             "{context}: {error}"
         );
         assert!(error.contains("authentication"), "{context}: {error}");
         assert!(
-            !self.directory.join("output.db").exists(),
+            !self.directory.path().join("output.db").exists(),
             "{context}: export was not removed"
         );
-    }
-}
-
-impl Drop for CliFixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.directory);
     }
 }
 
@@ -128,7 +97,7 @@ fn cli_verifies_and_exports_every_page() {
                 format!(
                     "decrypted {} pages to {}\n",
                     reader.page_count(),
-                    fixture.directory.join("output.db").display()
+                    fixture.directory.path().join("output.db").display()
                 )
             };
             assert_eq!(
@@ -138,7 +107,7 @@ fn cli_verifies_and_exports_every_page() {
                 case.name
             );
         }
-        let exported = std::fs::read(fixture.directory.join("output.db"))
+        let exported = std::fs::read(fixture.directory.path().join("output.db"))
             .unwrap_or_else(|error| panic!("{} read export: {error}", case.name));
         assert_eq!(
             exported.len(),
@@ -163,8 +132,11 @@ fn cli_verifies_and_exports_every_page() {
 fn cli_rejects_wrong_passphrases() {
     for case in FIXTURE_CASES {
         let fixture = CliFixture::new(case);
-        std::fs::write(fixture.directory.join("passphrase"), b"wrong passphrase")
-            .unwrap_or_else(|error| panic!("{} passphrase setup: {error}", case.name));
+        std::fs::write(
+            fixture.directory.path().join("passphrase"),
+            b"wrong passphrase",
+        )
+        .unwrap_or_else(|error| panic!("{} passphrase setup: {error}", case.name));
         for command in ["verify", "export"] {
             fixture.assert_authentication_failure(command, 1);
         }
@@ -190,7 +162,7 @@ fn cli_rejects_late_corruption_and_removes_partial_exports() {
                 .read_page_into(NonZeroU32::new(number).unwrap(), &mut page)
                 .unwrap_or_else(|error| panic!("{} preceding page {number}: {error}", case.name));
         }
-        std::fs::write(fixture.directory.join("input.db"), corrupted)
+        std::fs::write(fixture.directory.path().join("input.db"), corrupted)
             .unwrap_or_else(|error| panic!("{} corrupted input setup: {error}", case.name));
         for command in ["verify", "export"] {
             fixture.assert_authentication_failure(command, last_page);

@@ -1,5 +1,13 @@
+#[path = "common/cipher.rs"]
+mod cipher;
+#[path = "common/cli.rs"]
+mod cli_support;
+#[path = "common/files.rs"]
+mod files;
+
+use cipher::FixtureCipher;
 use std::{fs, io, num::NonZeroU32, path::PathBuf, sync::Arc};
-use veilite_core::{CipherConfig, CipherPreset, HashAlgorithm, SliceSource, SqlCipherReader};
+use veilite_core::{CipherConfig, SliceSource, SqlCipherReader};
 use veilite_turso::{
     OpenError, open_readonly, open_readonly_with_wal,
     snapshot::{VisitError, WalInput},
@@ -9,6 +17,7 @@ use veilite_turso::{
 #[derive(Clone, Copy)]
 struct Case {
     profile: &'static str,
+    cipher: FixtureCipher,
     main: &'static [u8],
     history: &'static [u8],
     shrink: &'static [u8],
@@ -17,9 +26,10 @@ struct Case {
 }
 
 macro_rules! case {
-    ($profile:literal) => {
+    ($profile:literal, $cipher:ident) => {
         Case {
             profile: $profile,
+            cipher: FixtureCipher::$cipher,
             main: include_bytes!(concat!("fixtures/wal/", $profile, "/main.db")),
             history: include_bytes!(concat!("fixtures/wal/", $profile, "/history.wal")),
             shrink: include_bytes!(concat!("fixtures/wal/", $profile, "/shrink.wal")),
@@ -28,17 +38,16 @@ macro_rules! case {
         }
     };
 }
-const CASES: [Case; 3] = [case!("3"), case!("4"), case!("custom")];
+const CASES: [Case; 3] = [
+    case!("3", SqlCipher3),
+    case!("4", SqlCipher4),
+    case!("custom", Custom),
+];
 const KEY: &[u8] = b"wal-fixture";
 
 impl Case {
     fn config(self) -> CipherConfig {
-        match self.profile {
-            "3" => CipherPreset::SqlCipher3.into(),
-            "4" => CipherPreset::SqlCipher4.into(),
-            _ => CipherConfig::new(2048, 100000, HashAlgorithm::Sha256, HashAlgorithm::Sha256)
-                .unwrap(),
-        }
+        self.cipher.config()
     }
 
     fn commit_ends(self) -> Vec<usize> {
@@ -48,23 +57,6 @@ impl Case {
             .filter(|&offset| be32(self.history, offset + 4) != 0)
             .map(|offset| offset + size)
             .collect()
-    }
-
-    fn cli_options(self) -> Vec<&'static str> {
-        match self.profile {
-            "custom" => vec![
-                "--custom",
-                "--page-size",
-                "2048",
-                "--kdf-iterations",
-                "100000",
-                "--kdf-algorithm",
-                "sha256",
-                "--hmac-algorithm",
-                "sha256",
-            ],
-            profile => vec!["--preset", profile],
-        }
     }
 }
 
@@ -88,18 +80,15 @@ impl Input {
         }
     }
     fn preserved(&self, case: Case, wal: &[u8]) {
-        assert_eq!(fs::read(&self.db).unwrap(), case.main);
-        assert_eq!(fs::read(&self.wal).unwrap(), wal);
-        for suffix in ["-shm", "-tshm", "-journal"] {
-            assert!(!self.dir.path().join(format!("input.db{suffix}")).exists());
-        }
+        files::assert_preserved(&self.db, case.main, Some(wal));
     }
+
     fn cli(&self, case: Case, command: &str) -> std::process::Output {
         let key = self.dir.path().join("key");
         fs::write(&key, KEY).unwrap();
         let mut cli = std::process::Command::new(env!("CARGO_BIN_EXE_veilite-test-cli"));
         cli.arg(command)
-            .args(case.cli_options())
+            .args(case.cipher.cli_options())
             .arg("--wal")
             .arg("--passphrase-file")
             .arg(key)
@@ -111,16 +100,22 @@ impl Input {
     }
 }
 
+#[track_caller]
 fn scalar(conn: &Arc<turso::Connection>, sql: &str) -> i64 {
     let mut result = None;
     conn.prepare(sql)
-        .unwrap()
+        .unwrap_or_else(|error| panic!("{sql}: prepare failed: {error}"))
         .run_with_row_callback(|row| {
+            assert!(
+                result.is_none(),
+                "{sql}: expected exactly one row, got multiple"
+            );
+            assert_eq!(row.len(), 1, "{sql}: expected exactly one column");
             result = Some(row.get::<i64>(0)?);
             Ok(())
         })
-        .unwrap();
-    result.unwrap()
+        .unwrap_or_else(|error| panic!("{sql}: query failed: {error}"));
+    result.unwrap_or_else(|| panic!("{sql}: expected exactly one row, got none"))
 }
 
 fn reference(case: Case, encrypted: &[u8]) -> Vec<u8> {
@@ -260,28 +255,42 @@ fn queries_and_traverses_reference_snapshots_including_growth_and_shrink() {
 fn uses_last_valid_commit_for_uncommitted_truncated_and_checksum_invalid_tails() {
     for case in CASES {
         let commits = case.commit_ends();
-        assert_eq!(commits.len(), 2);
+        assert_eq!(commits.len(), 2, "{}: commit count", case.profile);
         let end = commits[1];
-        assert!(case.history.len() > end);
+        assert!(
+            case.history.len() > end,
+            "{}: missing uncommitted tail",
+            case.profile
+        );
         let mut checksum = case.history[..end].to_vec();
         checksum[end - case.config().page_size() - 24 + 16] ^= 1;
-        for (wal, count, version) in [
-            (&case.history[..end], 9, 2),
-            (&case.history[..end - 11], 13, 1),
-            (checksum.as_slice(), 13, 1),
-            (&case.history[..16], 1, 0),
-            (&[][..], 1, 0),
+        for (scenario, wal, count, version) in [
+            ("committed", &case.history[..end], 9, 2),
+            ("truncated frame", &case.history[..end - 11], 13, 1),
+            ("invalid checksum", checksum.as_slice(), 13, 1),
+            ("truncated header", &case.history[..16], 1, 0),
+            ("empty WAL", &[][..], 1, 0),
         ] {
+            let context = format!("{}: {scenario}", case.profile);
             let input = Input::new(case, wal);
-            let conn = open_readonly_with_wal(&input.db, case.config(), KEY).unwrap();
-            assert_eq!(scalar(&conn, "SELECT count(*) FROM items"), count);
-            assert_eq!(scalar(&conn, "PRAGMA user_version"), version);
+            let conn = open_readonly_with_wal(&input.db, case.config(), KEY)
+                .unwrap_or_else(|error| panic!("{context}: open: {error}"));
+            assert_eq!(
+                scalar(&conn, "SELECT count(*) FROM items"),
+                count,
+                "{context}: row count"
+            );
+            assert_eq!(
+                scalar(&conn, "PRAGMA user_version"),
+                version,
+                "{context}: user version"
+            );
             WalInput::open(&input.db)
-                .unwrap()
+                .unwrap_or_else(|error| panic!("{context}: WAL input: {error}"))
                 .snapshot(case.config(), KEY)
-                .unwrap()
+                .unwrap_or_else(|error| panic!("{context}: snapshot: {error}"))
                 .visit_pages(|_, _| Ok(()))
-                .unwrap();
+                .unwrap_or_else(|error| panic!("{context}: page traversal: {error}"));
             drop(conn);
             input.preserved(case, wal);
         }
@@ -362,10 +371,20 @@ fn wal_cli_verifies_and_exports_the_same_selected_image() {
             for command in ["verify", "export"] {
                 let output = input.cli(case, command);
                 assert!(output.status.success(), "{output:?}");
-                assert!(
-                    std::str::from_utf8(&output.stdout)
-                        .unwrap()
-                        .contains("snapshot pages")
+                let pages = expected.len() / case.config().page_size();
+                let expected_stdout = if command == "verify" {
+                    format!("verified {pages} snapshot pages\n")
+                } else {
+                    format!(
+                        "decrypted {pages} snapshot pages to {}\n",
+                        input.dir.path().join("output.db").display()
+                    )
+                };
+                assert_eq!(
+                    output.stdout,
+                    expected_stdout.as_bytes(),
+                    "{}: {command}, expected {pages} snapshot pages",
+                    case.profile
                 );
                 assert!(output.stderr.is_empty(), "{output:?}");
             }
@@ -410,9 +429,22 @@ fn wal_cli_rejects_unused_page_corruption_and_removes_partial_export() {
         drop(conn);
         for command in ["verify", "export"] {
             let output = input.cli(case, command);
-            assert_eq!(output.status.code(), Some(1), "{output:?}");
-            assert!(output.stdout.is_empty());
-            assert!(!input.dir.path().join("output.db").exists());
+            let context = format!("{}: {command}, damaged page {last}", case.profile);
+            assert_eq!(output.status.code(), Some(1), "{context}: {output:?}");
+            assert!(output.stdout.is_empty(), "{context}: {output:?}");
+            let stderr = std::str::from_utf8(&output.stderr)
+                .unwrap_or_else(|error| panic!("{context}: invalid stderr: {error}"));
+            // Turso reports page authentication failures as PageCodecError,
+            // without preserving the underlying DecryptError text.
+            let expected_error = format!("Page codec failed for page={last}");
+            assert!(
+                stderr.lines().any(|line| line.ends_with(&expected_error)),
+                "{context}: {stderr}"
+            );
+            assert!(
+                !input.dir.path().join("output.db").exists(),
+                "{context}: partial export remains"
+            );
         }
         input.preserved(case, &wal);
     }
@@ -499,8 +531,11 @@ fn hardlinked_main_files_with_different_wal_paths_do_not_share_cached_state() {
     let conn = open_readonly_with_wal(&input.db, case.config(), KEY).unwrap();
     // Depending on the platform's registry identity, the second open either
     // rejects incompatible codec identity or opens its own correctly selected WAL.
-    if let Ok(other) = open_readonly_with_wal(&alias, case.config(), KEY) {
-        assert_eq!(scalar(&other, "PRAGMA user_version"), 3);
+    match open_readonly_with_wal(&alias, case.config(), KEY) {
+        Ok(other) => assert_eq!(scalar(&other, "PRAGMA user_version"), 3),
+        Err(OpenError::Turso(turso::LimboError::InvalidArgument(message)))
+            if message == "page codec identity does not match the existing database" => {}
+        Err(error) => panic!("unexpected hardlink open failure: {error}"),
     }
     assert_eq!(scalar(&conn, "PRAGMA user_version"), 2);
 }
