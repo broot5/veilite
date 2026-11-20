@@ -34,6 +34,9 @@ jobs:
     name: Rust ${{ matrix.toolchain }} / ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
     env:
       RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
       CARGO_BUILD_TARGET: ${{ matrix.target }}
@@ -46,6 +49,9 @@ jobs:
             toolchain: stable
           - runner: macos-15
             target: aarch64-apple-darwin
+            toolchain: stable
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
             toolchain: stable
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
